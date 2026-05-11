@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>scalar_field_belief</name>
+  <version>0.0.0</version>
+  <description>Simple scalar field belief based on GPytorch</description>
+
+  <author email="nathalie.bauschmann@tuhh.de">Nathalie Bauschmann</author>
+  <maintainer email="nathalie.bauschmann@tuhh.de">Nathalie Bauschmann</maintainer>
+  <url type="website">hippocampusrobotics.github.io/docs</url>
+
+  <license>GPLv2</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>ament_cmake_python</buildtool_depend>
+
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>sensor_msgs_py</depend>
+  <depend>scalar_field_interfaces</depend>
+  
+  <!-- The export tag contains other, unspecified, tags -->
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

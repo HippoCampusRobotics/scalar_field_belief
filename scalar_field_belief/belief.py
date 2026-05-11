@@ -1,0 +1,178 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+import numpy as np
+import torch
+import gpytorch
+
+from scalar_field_belief.config import BeliefConfig
+from scalar_field_belief.models import (
+    ExactFieldGP,
+    build_covar_module,
+    initialize_model_hyperparameters,
+)
+from scalar_field_belief.transforms import InputNormalizer2d, TargetStandardizer
+
+
+@dataclass
+class FitResult:
+    did_refit: bool
+    num_measurements: int
+
+
+class ScalarFieldBelief:
+    def __init__(self, config: BeliefConfig):
+        config.validate()
+        self.config = config
+        self.normalizer = InputNormalizer2d(
+            x_min=config.x_min,
+            x_max=config.x_max,
+            y_min=config.y_min,
+            y_max=config.y_max,
+        )
+        self.reset()
+
+    def reset(self) -> None:
+        self.xy_train_phys = np.empty((0, 2), dtype=float)
+        self.y_train = np.empty((0,), dtype=float)
+        self.new_since_last_fit = 0
+        self.model: ExactFieldGP | None = None
+        self.likelihood: gpytorch.likelihoods.GaussianLikelihood | None = None
+        self.standardizer: TargetStandardizer | None = None
+
+    def add_measurement(self, x: float, y: float, value: float) -> FitResult:
+        if not np.isfinite(x) or not np.isfinite(y):
+            raise ValueError("Measurement x/y must be finite.")
+        if not np.isfinite(value):
+            raise ValueError("Measurement value must be finite.")
+
+        xy = np.array([[x, y]], dtype=float)
+        val = np.array([value], dtype=float)
+        self.xy_train_phys = np.vstack([self.xy_train_phys, xy])
+        self.y_train = np.concatenate([self.y_train, val])
+        self.new_since_last_fit += 1
+
+        did_refit = self.maybe_refit()
+        return FitResult(did_refit=did_refit, num_measurements=len(self.y_train))
+
+    def maybe_refit(self) -> bool:
+        if len(self.y_train) == 0:
+            return False
+
+        should_refit = False
+        if self.config.refit_policy == "every_measurement":
+            should_refit = True
+        elif self.config.refit_policy == "every_k_measurements":
+            should_refit = self.new_since_last_fit >= self.config.refit_every_k
+        else:
+            raise ValueError(f"Unknown refit_policy: {self.config.refit_policy}")
+
+        if not should_refit:
+            return False
+
+        self._fit_model()
+        self.new_since_last_fit = 0
+        return True
+
+    def has_model(self) -> bool:
+        return (
+            self.model is not None
+            and self.likelihood is not None
+            and self.standardizer is not None
+        )
+
+    def query(self, xy_phys: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        if not self.has_model():
+            raise RuntimeError("Belief has no fitted model yet.")
+
+        xy_phys = np.asarray(xy_phys, dtype=float)
+        if xy_phys.ndim != 2 or xy_phys.shape[1] != 2:
+            raise ValueError(f"xy_phys must have shape (N, 2), got {xy_phys.shape}")
+        if not np.all(np.isfinite(xy_phys)):
+            raise ValueError("xy_phys must contain only finite values.")
+
+        train_x, _, query_x = self._build_tensors(xy_phys)
+        del train_x
+
+        assert self.model is not None
+        assert self.likelihood is not None
+        assert self.standardizer is not None
+
+        self.model.eval()
+        self.likelihood.eval()
+
+        with torch.no_grad(), gpytorch.settings.fast_pred_var():
+            posterior = self.model(query_x)
+            mean_norm = posterior.mean
+            var_norm = posterior.variance
+
+        mean, var = self.standardizer.inverse_transform_mean_var(mean_norm, var_norm)
+        return mean.detach().cpu().numpy(), var.detach().cpu().numpy()
+
+    def _fit_model(self) -> None:
+        train_x, train_y, _ = self._build_tensors(None)
+        likelihood = gpytorch.likelihoods.GaussianLikelihood().to(self.config.device)
+        covar_module = build_covar_module(self.config.kernel_type).to(
+            self.config.device
+        )
+        model = ExactFieldGP(train_x, train_y, likelihood, covar_module).to(
+            self.config.device
+        )
+        initialize_model_hyperparameters(
+            model=model,
+            likelihood=likelihood,
+            train_x=train_x,
+            init_lengthscale=(
+                self.config.init_lengthscale_x,
+                self.config.init_lengthscale_y,
+            ),
+            init_outputscale=self.config.init_outputscale,
+            init_noise=self.config.init_noise,
+        )
+
+        model.train()
+        likelihood.train()
+        optimizer = torch.optim.Adam(model.parameters(), lr=self.config.learning_rate)
+        mll = gpytorch.mlls.ExactMarginalLogLikelihood(likelihood, model)
+
+        for _ in range(self.config.training_iter):
+            optimizer.zero_grad()
+            output = model(train_x)
+            loss = -mll(output, train_y)
+            loss.backward()
+            optimizer.step()
+
+        self.model = model
+        self.likelihood = likelihood
+
+    def _build_tensors(
+        self,
+        query_xy_phys: np.ndarray | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        if len(self.y_train) == 0:
+            raise RuntimeError("Cannot build tensors without training data.")
+
+        xy_train_norm = self.normalizer.transform(self.xy_train_phys)
+        train_x = torch.as_tensor(
+            xy_train_norm,
+            dtype=self.config.dtype,
+            device=self.config.device,
+        )
+        y_train_tensor = torch.as_tensor(
+            self.y_train,
+            dtype=self.config.dtype,
+            device=self.config.device,
+        )
+        self.standardizer = TargetStandardizer.fit(y_train_tensor)
+        train_y = self.standardizer.transform(y_train_tensor)
+
+        query_x = None
+        if query_xy_phys is not None:
+            query_xy_norm = self.normalizer.transform(query_xy_phys)
+            query_x = torch.as_tensor(
+                query_xy_norm,
+                dtype=self.config.dtype,
+                device=self.config.device,
+            )
+
+        return train_x, train_y, query_x
