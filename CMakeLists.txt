@@ -40,7 +40,6 @@ find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(geometry_msgs REQUIRED)
-find_package(sensor_msgs REQUIRED)
 find_package(scalar_field_interfaces REQUIRED)
 
 # include_directories(include)
@@ -51,14 +50,11 @@ ament_python_install_package(${PROJECT_NAME})
 # Install Python executables
 install(PROGRAMS
   nodes/scalar_field_belief_node.py
-  nodes/test_measurement_publisher_node.py
-  scripts/query_belief.py
-  scripts/publish_measurement.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
 install(
-  DIRECTORY launch 
+  DIRECTORY launch config
   DESTINATION share/${PROJECT_NAME}
 )
 

@@ -6,7 +6,6 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 from std_srvs.srv import Trigger
-from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import PointCloud2
 
 from scalar_field_interfaces.msg import ScalarMeasurement
