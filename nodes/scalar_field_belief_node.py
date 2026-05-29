@@ -5,8 +5,11 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
+from rcl_interfaces.msg import SetParametersResult
 from std_srvs.srv import Trigger
 from sensor_msgs.msg import PointCloud2
+from math import isfinite
+import traceback
 
 from scalar_field_interfaces.msg import ScalarMeasurement
 from scalar_field_interfaces.srv import QueryScalarFieldBelief
@@ -25,6 +28,21 @@ class ScalarFieldBeliefNode(Node):
         config = self._read_config()
         self.belief = ScalarFieldBelief(config)
         self.config = config
+
+        self._field_color_min = (
+            self.get_parameter("field_color_min").get_parameter_value().double_value
+        )
+        self._field_color_max = (
+            self.get_parameter("field_color_max").get_parameter_value().double_value
+        )
+        self._use_fixed_field_color_max = (
+            self.get_parameter("use_fixed_field_color_max")
+            .get_parameter_value()
+            .bool_value
+        )
+        self._z_offset = (
+            self.get_parameter("z_offset").get_parameter_value().double_value
+        )
 
         self.measurement_sub = self.create_subscription(
             ScalarMeasurement,
@@ -52,6 +70,10 @@ class ScalarFieldBeliefNode(Node):
         self.mean_pub = self.create_publisher(PointCloud2, "belief/mean_cloud", qos)
         self.var_pub = self.create_publisher(PointCloud2, "belief/variance_cloud", qos)
 
+        self._param_cb_handle = self.add_on_set_parameters_callback(
+            self._on_set_parameters
+        )
+
         self.get_logger().info("scalar_field_belief node started.")
 
     def _declare_parameters(self) -> None:
@@ -73,6 +95,91 @@ class ScalarFieldBeliefNode(Node):
         self.declare_parameter("visualization_grid_step", 0.1)
         self.declare_parameter("visualization_z_mode", "flat")
         self.declare_parameter("visualization_height_scale", 0.5)
+        self.declare_parameter("field_color_min", 0.0)
+        self.declare_parameter("field_color_max", 0.015)
+        self.declare_parameter("use_fixed_field_color_max", False)
+        self.declare_parameter("z_offset", -0.8)
+
+    def _on_set_parameters(self, params) -> SetParametersResult:
+        new_field_color_min = self._field_color_min
+        new_field_color_max = self._field_color_max
+        new_use_fixed_field_color_max = self._use_fixed_field_color_max
+        new_z_offset = self._z_offset
+
+        color_updated = False
+        z_offset_updated = False
+        updated = False
+
+        for param in params:
+            if param.name == "field_color_min":
+                new_field_color_min = float(param.value)
+                color_updated = True
+                updated = True
+
+            elif param.name == "field_color_max":
+                new_field_color_max = float(param.value)
+                color_updated = True
+                updated = True
+
+            elif param.name == "use_fixed_field_color_max":
+                new_use_fixed_field_color_max = bool(param.value)
+                color_updated = True
+                updated = True
+
+            elif param.name == "z_offset":
+                new_z_offset = float(param.value)
+                z_offset_updated = True
+                updated = True
+
+        if not isfinite(new_field_color_min):
+            return SetParametersResult(
+                successful=False,
+                reason="field_color_min must be finite.",
+            )
+
+        if not isfinite(new_field_color_max):
+            return SetParametersResult(
+                successful=False,
+                reason="field_color_max must be finite.",
+            )
+
+        if new_field_color_min >= new_field_color_max:
+            return SetParametersResult(
+                successful=False,
+                reason="field_color_min must be smaller than field_color_max.",
+            )
+
+        if not isfinite(new_z_offset):
+            return SetParametersResult(
+                successful=False,
+                reason="z_offset must be finite.",
+            )
+
+        self._field_color_min = new_field_color_min
+        self._field_color_max = new_field_color_max
+        self._use_fixed_field_color_max = new_use_fixed_field_color_max
+        self._z_offset = new_z_offset
+
+        if color_updated:
+            if self._use_fixed_field_color_max:
+                self.get_logger().info(
+                    f"Updated field color range to "
+                    f"[{self._field_color_min:.6f}, {self._field_color_max:.6f}]."
+                )
+            else:
+                self.get_logger().info(
+                    f"Stored field color range "
+                    f"[{self._field_color_min:.6f}, {self._field_color_max:.6f}], "
+                    "but dynamic color max is currently active."
+                )
+
+        if z_offset_updated:
+            self.get_logger().info(f"Updated z_offset to {self._z_offset:.6f}.")
+
+        if updated and self.config.publish_visualization:
+            self._publish_visualization()
+
+        return SetParametersResult(successful=True)
 
     def _read_config(self) -> BeliefConfig:
         cfg = BeliefConfig(
@@ -125,7 +232,9 @@ class ScalarFieldBeliefNode(Node):
             if result.did_refit and self.config.publish_visualization:
                 self._publish_visualization()
         except Exception as exc:
-            self.get_logger().error(f"Failed to process measurement: {exc}")
+            self.get_logger().error(
+                f"Failed to process measurement: {exc}\n{traceback.format_exc()}"
+            )
 
     def _handle_query(self, request, response):
         if len(request.queries) == 0:
@@ -181,12 +290,23 @@ class ScalarFieldBeliefNode(Node):
         )
         mean, variance = self.belief.query(grid_xy)
         stamp = self.get_clock().now().to_msg()
+
+        if self._use_fixed_field_color_max:
+            effective_color_max = self._field_color_max
+        else:
+            effective_color_max = max(
+                float(np.max(mean)),
+                self._field_color_min + 1e-6,
+            )
         mean_cloud = make_field_pointcloud2(
             positions_xy=grid_xy,
             values=mean,
             frame_id=self.config.frame_id,
             stamp=stamp,
             z_mode=self.config.visualization_z_mode,
+            z_offset=self._z_offset,
+            colormap_min=self._field_color_min,
+            colormap_max=effective_color_max,
             height_scale=self.config.visualization_height_scale,
         )
         var_cloud = make_field_pointcloud2(
@@ -195,6 +315,7 @@ class ScalarFieldBeliefNode(Node):
             frame_id=self.config.frame_id,
             stamp=stamp,
             z_mode=self.config.visualization_z_mode,
+            z_offset=self._z_offset,
             height_scale=self.config.visualization_height_scale,
         )
         self.mean_pub.publish(mean_cloud)
@@ -204,7 +325,10 @@ class ScalarFieldBeliefNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = ScalarFieldBeliefNode()
-    rclpy.spin(node)
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
     node.destroy_node()
     rclpy.shutdown()
 

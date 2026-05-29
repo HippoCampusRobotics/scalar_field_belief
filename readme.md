@@ -29,9 +29,3 @@ Services:
 ```bash
 ros2 launch scalar_field_belief test_belief.launch.py
 ```
-
-Then query e.g.
-
-```bash
-ros2 run scalar_field_belief query_belief.py 0.5 1.0
-```
