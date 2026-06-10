@@ -23,3 +23,9 @@
     visualization_grid_step: 0.1
     visualization_z_mode: flat
     visualization_height_scale: 0.5
+
+    # visualization only
+    field_color_min: 0.0
+    field_color_max: 0.015
+    use_fixed_field_color_max: false
+    z_offset: -0.8

@@ -21,6 +21,20 @@ class FitResult:
 
 
 class ScalarFieldBelief:
+    """Simple exact-GP belief over a 2D scalar field.
+
+    The belief stores all measurements in physical coordinates, normalizes inputs
+    before passing them to the GP, and standardizes targets during model fitting.
+
+    Notes
+    -----
+    - Inputs are always represented in physical coordinates `(x, y)` at the API
+      boundary of this class.
+    - The GP itself operates on normalized inputs.
+    - `query(...)` returns posterior latent mean and variance in the original
+      measurement units.
+    """
+
     def __init__(self, config: BeliefConfig):
         config.validate()
         self.config = config
@@ -33,6 +47,7 @@ class ScalarFieldBelief:
         self.reset()
 
     def reset(self) -> None:
+        """Clear all stored measurements and fitted model state."""
         self.xy_train_phys = np.empty((0, 2), dtype=float)
         self.y_train = np.empty((0,), dtype=float)
         self.new_since_last_fit = 0
@@ -41,6 +56,7 @@ class ScalarFieldBelief:
         self.standardizer: TargetStandardizer | None = None
 
     def add_measurement(self, x: float, y: float, value: float) -> FitResult:
+        """Add one scalar measurement and refit if required by the current policy."""
         if not np.isfinite(x) or not np.isfinite(y):
             raise ValueError("Measurement x/y must be finite.")
         if not np.isfinite(value):
@@ -56,6 +72,7 @@ class ScalarFieldBelief:
         return FitResult(did_refit=did_refit, num_measurements=len(self.y_train))
 
     def maybe_refit(self) -> bool:
+        """Refit the GP if the configured refit policy says so."""
         if len(self.y_train) == 0:
             return False
 
@@ -75,6 +92,7 @@ class ScalarFieldBelief:
         return True
 
     def has_model(self) -> bool:
+        """Return whether a fitted model and its associated transforms exist."""
         return (
             self.model is not None
             and self.likelihood is not None
@@ -82,6 +100,7 @@ class ScalarFieldBelief:
         )
 
     def query(self, xy_phys: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Query posterior latent mean and variance at physical `(x, y)` positions."""
         if not self.has_model():
             raise RuntimeError("Belief has no fitted model yet.")
 
@@ -91,8 +110,7 @@ class ScalarFieldBelief:
         if not np.all(np.isfinite(xy_phys)):
             raise ValueError("xy_phys must contain only finite values.")
 
-        train_x, _, query_x = self._build_tensors(xy_phys)
-        del train_x
+        query_x = self._build_query_tensor(xy_phys)
 
         assert self.model is not None
         assert self.likelihood is not None
@@ -110,7 +128,9 @@ class ScalarFieldBelief:
         return mean.detach().cpu().numpy(), var.detach().cpu().numpy()
 
     def _fit_model(self) -> None:
-        train_x, train_y, _ = self._build_tensors(None)
+        """Fit a fresh exact GP to all currently stored measurements."""
+        train_x, train_y = self._build_train_tensors()
+
         likelihood = gpytorch.likelihoods.GaussianLikelihood().to(self.config.device)
         covar_module = build_covar_module(self.config.kernel_type).to(
             self.config.device
@@ -145,10 +165,13 @@ class ScalarFieldBelief:
         self.model = model
         self.likelihood = likelihood
 
-    def _build_tensors(
-        self,
-        query_xy_phys: np.ndarray | None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    def _build_train_tensors(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Build normalized training inputs and standardized training targets.
+
+        This method is used only during fitting. It also updates
+        `self.standardizer`, because target standardization is part of the fitted
+        training state.
+        """
         if len(self.y_train) == 0:
             raise RuntimeError("Cannot build tensors without training data.")
 
@@ -166,13 +189,27 @@ class ScalarFieldBelief:
         self.standardizer = TargetStandardizer.fit(y_train_tensor)
         train_y = self.standardizer.transform(y_train_tensor)
 
-        query_x = None
-        if query_xy_phys is not None:
-            query_xy_norm = self.normalizer.transform(query_xy_phys)
-            query_x = torch.as_tensor(
-                query_xy_norm,
-                dtype=self.config.dtype,
-                device=self.config.device,
-            )
+        return train_x, train_y
 
-        return train_x, train_y, query_x
+    def _build_query_tensor(self, query_xy_phys: np.ndarray) -> torch.Tensor:
+        """Build normalized query inputs for posterior evaluation.
+
+        This method is intentionally read-only with respect to the belief state.
+        In particular, it does not rebuild training tensors and does not refit the
+        target standardizer.
+        """
+        query_xy_phys = np.asarray(query_xy_phys, dtype=float)
+        if query_xy_phys.ndim != 2 or query_xy_phys.shape[1] != 2:
+            raise ValueError(
+                f"query_xy_phys must have shape (N, 2), got {query_xy_phys.shape}"
+            )
+        if not np.all(np.isfinite(query_xy_phys)):
+            raise ValueError("query_xy_phys must contain only finite values.")
+
+        query_xy_norm = self.normalizer.transform(query_xy_phys)
+        query_x = torch.as_tensor(
+            query_xy_norm,
+            dtype=self.config.dtype,
+            device=self.config.device,
+        )
+        return query_x
