@@ -1,4 +1,31 @@
 #!/usr/bin/env python3
+"""ROS 2 node for the scalar field GP belief.
+
+This node wraps the ROS-independent `ScalarFieldBelief` class and exposes it
+through ROS topics, services, and visualization point clouds.
+
+Subscriptions
+-------------
+`ir_measurement`
+    Scalar measurements of type `scalar_field_interfaces/ScalarMeasurement`.
+
+Services
+--------
+`query_scalar_field_belief`
+    Query posterior mean and variance at requested poses.
+
+`reset_scalar_field_belief`
+    Clear all stored measurements and fitted GP state.
+
+Publications
+------------
+`belief/mean_cloud`
+    PointCloud2 visualization of the posterior mean.
+
+`belief/variance_cloud`
+    PointCloud2 visualization of the posterior variance.
+"""
+
 from __future__ import annotations
 
 import traceback
@@ -6,9 +33,10 @@ from math import isfinite
 
 import numpy as np
 import rclpy
-from rcl_interfaces.msg import SetParametersResult
+from rcl_interfaces.msg import ParameterDescriptor, SetParametersResult
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rclpy.qos import (
     DurabilityPolicy,
     HistoryPolicy,
@@ -29,6 +57,29 @@ from scalar_field_belief.visualization import (
 
 
 class ScalarFieldBeliefNode(Node):
+    """ROS 2 interface for the scalar field GP belief.
+
+    The node keeps ROS-specific concerns separate from the core belief model:
+    message parsing, service responses, parameters, logging, and visualization
+    are handled here, while GP fitting and querying are handled by
+    `ScalarFieldBelief`.
+
+    Notes
+    -----
+    Most parameters are static and should be changed in the YAML file before
+    starting the node. Only selected visualization parameters are dynamic.
+    """
+
+    DYNAMIC_PARAMETERS = {
+        'field_color_min',
+        'field_color_max',
+        'use_fixed_field_color_max',
+        'z_offset',
+    }
+    PASSTHROUGH_PARAMETERS = {
+        'use_sim_time',
+    }
+
     def __init__(self):
         super().__init__('scalar_field_belief')
         self._declare_parameters()
@@ -92,109 +143,179 @@ class ScalarFieldBeliefNode(Node):
         self.get_logger().info('scalar_field_belief node started.')
 
     def _declare_parameters(self) -> None:
-        self.declare_parameter('frame_id', 'map')
-        self.declare_parameter('x_min', 0.0)
-        self.declare_parameter('x_max', 2.0)
-        self.declare_parameter('y_min', 0.0)
-        self.declare_parameter('y_max', 4.0)
-        self.declare_parameter('kernel_type', 'rbf')
-        self.declare_parameter('training_iter', 50)
-        self.declare_parameter('learning_rate', 0.1)
-        self.declare_parameter('init_lengthscale_x', 0.2)
-        self.declare_parameter('init_lengthscale_y', 0.2)
-        self.declare_parameter('init_outputscale', 1.0)
-        self.declare_parameter('init_noise', 0.05)
-        self.declare_parameter('refit_policy', 'every_measurement')
-        self.declare_parameter('refit_every_k', 1)
-        self.declare_parameter('publish_visualization', True)
-        self.declare_parameter('visualization_grid_step', 0.1)
-        self.declare_parameter('visualization_z_mode', 'flat')
-        self.declare_parameter('visualization_height_scale', 0.5)
-        self.declare_parameter('field_color_min', 0.0)
-        self.declare_parameter('field_color_max', 0.015)
-        self.declare_parameter('use_fixed_field_color_max', False)
-        self.declare_parameter('z_offset', -0.8)
+        """Declare ROS parameters used by this node.
 
-    def _on_set_parameters(self, params) -> SetParametersResult:
-        new_field_color_min = self._field_color_min
-        new_field_color_max = self._field_color_max
-        new_use_fixed_field_color_max = self._use_fixed_field_color_max
-        new_z_offset = self._z_offset
+        Static parameters are marked as read-only. They can still be initialized
+        from launch/YAML files, but they cannot be changed while the node is
+        running.
 
-        color_updated = False
-        z_offset_updated = False
-        updated = False
+        Only visualization convenience parameters are declared as dynamic.
+        """
+        self.declare_parameter('frame_id', 'map', self._static_descriptor())
+        self.declare_parameter('x_min', 0.0, self._static_descriptor())
+        self.declare_parameter('x_max', 2.0, self._static_descriptor())
+        self.declare_parameter('y_min', 0.0, self._static_descriptor())
+        self.declare_parameter('y_max', 4.0, self._static_descriptor())
+        self.declare_parameter('kernel_type', 'rbf', self._static_descriptor())
+        self.declare_parameter('training_iter', 50, self._static_descriptor())
+        self.declare_parameter(
+            'learning_rate', (0.1), self._static_descriptor()
+        )
+        self.declare_parameter(
+            'init_lengthscale_x', 0.2, self._static_descriptor()
+        )
+        self.declare_parameter(
+            'init_lengthscale_y', 0.2, self._static_descriptor()
+        )
+        self.declare_parameter(
+            'init_outputscale', 1.0, self._static_descriptor()
+        )
+        self.declare_parameter('init_noise', 0.05, self._static_descriptor())
+        self.declare_parameter(
+            'refit_policy', 'every_measurement', self._static_descriptor()
+        )
+        self.declare_parameter('refit_every_k', 1, self._static_descriptor())
+        self.declare_parameter(
+            'publish_visualization', True, self._static_descriptor()
+        )
+        self.declare_parameter(
+            'visualization_grid_step', 0.1, self._static_descriptor()
+        )
+        self.declare_parameter(
+            'visualization_z_mode', 'flat', self._static_descriptor()
+        )
+        self.declare_parameter(
+            'visualization_height_scale', 0.5, self._static_descriptor()
+        )
+        self.declare_parameter(
+            'field_color_min', 0.0, self._dynamic_descriptor()
+        )
+        self.declare_parameter(
+            'field_color_max', 0.015, self._dynamic_descriptor()
+        )
+        self.declare_parameter(
+            'use_fixed_field_color_max', False, self._dynamic_descriptor()
+        )
+        self.declare_parameter('z_offset', -0.8, self._dynamic_descriptor())
+
+    def _static_descriptor(self, description: str = '') -> ParameterDescriptor:
+        """Return a descriptor for parameters that require a node restart."""
+        return ParameterDescriptor(
+            description=description,
+            additional_constraints='Static parameter. '
+            + 'Change in YAML and restart node.',
+            read_only=True,
+        )
+
+    def _dynamic_descriptor(self, description: str = '') -> ParameterDescriptor:
+        """Return a descriptor for parameters that may be changed at runtime."""
+        return ParameterDescriptor(
+            description=description,
+            additional_constraints='Dynamic parameter. '
+            + 'May be changed at runtime.',
+            read_only=False,
+        )
+
+    def _on_set_parameters(
+        self, params: list[Parameter]
+    ) -> SetParametersResult:
+        """Update selected visualization parameters at runtime."""
+        unsupported = [
+            param.name
+            for param in params
+            if param.name not in self.DYNAMIC_PARAMETERS
+            and param.name not in self.PASSTHROUGH_PARAMETERS
+        ]
+        if unsupported:
+            return SetParametersResult(
+                successful=False,
+                reason=(
+                    'These parameters are not dynamic: '
+                    f'{", ".join(unsupported)}. '
+                    'Change them in the YAML file and restart the node.'
+                ),
+            )
+
+        values = {
+            'field_color_min': self._field_color_min,
+            'field_color_max': self._field_color_max,
+            'use_fixed_field_color_max': self._use_fixed_field_color_max,
+            'z_offset': self._z_offset,
+        }
 
         for param in params:
-            if param.name == 'field_color_min':
-                new_field_color_min = float(param.value)
-                color_updated = True
-                updated = True
+            try:
+                values[param.name] = self._parameter_value(param)
+            except ValueError as exc:
+                return SetParametersResult(successful=False, reason=str(exc))
 
-            elif param.name == 'field_color_max':
-                new_field_color_max = float(param.value)
-                color_updated = True
-                updated = True
+        try:
+            self._validate_visualization_params(values)
+        except ValueError as exc:
+            return SetParametersResult(successful=False, reason=str(exc))
 
-            elif param.name == 'use_fixed_field_color_max':
-                new_use_fixed_field_color_max = bool(param.value)
-                color_updated = True
-                updated = True
+        self._field_color_min = float(values['field_color_min'])
+        self._field_color_max = float(values['field_color_max'])
+        self._use_fixed_field_color_max = bool(
+            values['use_fixed_field_color_max']
+        )
+        self._z_offset = float(values['z_offset'])
 
-            elif param.name == 'z_offset':
-                new_z_offset = float(param.value)
-                z_offset_updated = True
-                updated = True
+        self._log_dynamic_parameter_update({param.name for param in params})
 
-        if not isfinite(new_field_color_min):
-            return SetParametersResult(
-                successful=False,
-                reason='field_color_min must be finite.',
+        if self.config.publish_visualization:
+            self._publish_visualization()
+
+        return SetParametersResult(successful=True)
+
+    @staticmethod
+    def _parameter_value(param: Parameter) -> float | bool:
+        """Convert a supported dynamic ROS parameter to a Python value."""
+        if param.name == 'use_fixed_field_color_max':
+            if param.type_ != Parameter.Type.BOOL:
+                raise ValueError('use_fixed_field_color_max must be a boolean.')
+            return bool(param.value)
+
+        if param.type_ not in {Parameter.Type.DOUBLE, Parameter.Type.INTEGER}:
+            raise ValueError(f'{param.name} must be a number.')
+
+        value = float(param.value)
+        if not isfinite(value):
+            raise ValueError(f'{param.name} must be finite.')
+
+        return value
+
+    @staticmethod
+    def _validate_visualization_params(values: dict[str, float | bool]) -> None:
+        """Validate dynamic visualization parameter values."""
+        field_color_min = float(values['field_color_min'])
+        field_color_max = float(values['field_color_max'])
+
+        if field_color_min >= field_color_max:
+            raise ValueError(
+                'field_color_min must be smaller than field_color_max.'
             )
 
-        if not isfinite(new_field_color_max):
-            return SetParametersResult(
-                successful=False,
-                reason='field_color_max must be finite.',
-            )
-
-        if new_field_color_min >= new_field_color_max:
-            return SetParametersResult(
-                successful=False,
-                reason='field_color_min must be smaller than field_color_max.',
-            )
-
-        if not isfinite(new_z_offset):
-            return SetParametersResult(
-                successful=False,
-                reason='z_offset must be finite.',
-            )
-
-        self._field_color_min = new_field_color_min
-        self._field_color_max = new_field_color_max
-        self._use_fixed_field_color_max = new_use_fixed_field_color_max
-        self._z_offset = new_z_offset
-
-        if color_updated:
+    def _log_dynamic_parameter_update(self, changed_names: set[str]) -> None:
+        """Log successful dynamic parameter updates."""
+        if {
+            'field_color_min',
+            'field_color_max',
+            'use_fixed_field_color_max',
+        } & changed_names:
             if self._use_fixed_field_color_max:
                 self.get_logger().info(
-                    f'Updated field color range to '
+                    'Using fixed field color range '
                     f'[{self._field_color_min:.6f}, {self._field_color_max:.6f}].'
                 )
             else:
                 self.get_logger().info(
-                    f'Stored field color range '
-                    f'[{self._field_color_min:.6f}, {self._field_color_max:.6f}], '
-                    'but dynamic color max is currently active.'
+                    'Using dynamic field color scaling. Stored fixed range is '
+                    f'[{self._field_color_min:.6f}, {self._field_color_max:.6f}].'
                 )
 
-        if z_offset_updated:
-            self.get_logger().info(f'Updated z_offset to {self._z_offset:.6f}.')
-
-        if updated and self.config.publish_visualization:
-            self._publish_visualization()
-
-        return SetParametersResult(successful=True)
+        if 'z_offset' in changed_names:
+            self.get_logger().info(f'Using z_offset {self._z_offset:.6f}.')
 
     def _read_config(self) -> BeliefConfig:
         cfg = BeliefConfig(
@@ -235,6 +356,14 @@ class ScalarFieldBeliefNode(Node):
         return cfg
 
     def _on_measurement(self, msg: ScalarMeasurement) -> None:
+        """Store one incoming scalar measurement and refit if required.
+
+        Only the x and y position components are used by the current 2D belief.
+        The z coordinate and orientation in the measurement pose are ignored.
+
+        Measurements with a frame different from the configured belief frame are
+        rejected. This node does not transform measurements between frames.
+        """
         frame_id = msg.header.frame_id or self.config.frame_id
         if frame_id != self.config.frame_id:
             self.get_logger().warning(
@@ -261,6 +390,12 @@ class ScalarFieldBeliefNode(Node):
             )
 
     def _handle_query(self, request, response):
+        """Handle a posterior belief query service request.
+
+        The service expects query poses in the configured belief frame. The
+        current model returns latent posterior mean and variance in original
+        measurement units.
+        """
         if len(request.queries) == 0:
             response.success = False
             response.status_message = 'No query poses provided.'
@@ -306,6 +441,19 @@ class ScalarFieldBeliefNode(Node):
         return response
 
     def _publish_visualization(self) -> None:
+        """Publish mean and variance point clouds for the current belief.
+
+        The visualization grid is generated in physical coordinates over the
+        configured domain. The belief is queried at all grid points, and the
+        resulting mean and variance are published as separate clouds.
+
+        The mean cloud uses the configurable field color range. If fixed color
+        scaling is disabled, the upper color limit is chosen from the current
+        posterior mean cloud.
+
+        The variance cloud currently uses the default color range of
+        `make_field_pointcloud2`.
+        """
         if not self.belief.has_model():
             return
         grid_xy = make_grid_positions(

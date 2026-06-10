@@ -1,3 +1,14 @@
+"""Exact-GP belief model for a 2D scalar field.
+
+This module contains the core, ROS-independent belief implementation. The class
+stores scalar measurements in physical coordinates, refits an exact Gaussian
+process according to a configurable policy, and answers posterior queries at
+physical `(x, y)` positions.
+
+The ROS node is responsible for translating messages and services to this plain
+Python interface.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -28,13 +39,21 @@ class ScalarFieldBelief:
     inputs before passing them to the GP, and standardizes targets
     during model fitting.
 
+    Parameters
+    ----------
+    config
+        Configuration for domain bounds, GP hyperparameters, refit behavior, and
+        visualization settings.
+
     Notes
     -----
-    - Inputs are always represented in physical coordinates `(x, y)` at the API
-      boundary of this class.
-    - The GP itself operates on normalized inputs.
-    - `query(...)` returns posterior latent mean and variance in the original
-      measurement units.
+    Inputs are always represented in physical coordinates `(x, y)` at the public
+    API boundary of this class.
+
+    Internally, the GP operates on normalized inputs and standardized target
+    values. Query results are transformed back to original measurement units.
+
+    The query method returns the latent GP posterior mean and variance.
     """
 
     def __init__(self, config: BeliefConfig):
@@ -49,7 +68,11 @@ class ScalarFieldBelief:
         self.reset()
 
     def reset(self) -> None:
-        """Clear all stored measurements and fitted model state."""
+        """Clear all stored measurements and fitted model state.
+
+        After reset, the belief has no fitted model. A query will fail until
+        enough measurements have been added to trigger the first refit.
+        """
         self.xy_train_phys = np.empty((0, 2), dtype=float)
         self.y_train = np.empty((0,), dtype=float)
         self.new_since_last_fit = 0
@@ -58,8 +81,28 @@ class ScalarFieldBelief:
         self.standardizer: TargetStandardizer | None = None
 
     def add_measurement(self, x: float, y: float, value: float) -> FitResult:
-        """Add one scalar measurement and refit if required by the current
-        policy.
+        """Add one scalar measurement and refit if required/according to
+        configured refit policy.
+
+        Parameters
+        ----------
+        x
+            Physical x coordinate of the measurement.
+        y
+            Physical y coordinate of the measurement.
+        value
+            Scalar measurement value.
+
+        Returns
+        -------
+        FitResult
+            Information about whether the model was refitted and how many
+            measurements are stored.
+
+        Raises
+        ------
+        ValueError
+            If `x`, `y`, or `value` is not finite.
         """
         if not np.isfinite(x) or not np.isfinite(y):
             raise ValueError('Measurement x/y must be finite.')
@@ -108,8 +151,32 @@ class ScalarFieldBelief:
         )
 
     def query(self, xy_phys: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Query posterior latent mean and variance at physical `(x, y)`
-        positions.
+        """Query latent posterior mean and variance at physical positions.
+
+        Parameters
+        ----------
+        xy_phys
+            Physical query positions with shape `(N, 2)`.
+
+        Returns
+        -------
+        tuple[np.ndarray, np.ndarray]
+            Posterior latent mean and variance at the query positions. Both are
+            returned in original measurement units. The variance is in
+            measurement units squared.
+
+        Raises
+        ------
+        RuntimeError
+            If no fitted model is available yet.
+        ValueError
+            If `xy_phys` does not have shape `(N, 2)` or contains non-finite
+            values.
+
+        Notes
+        -----
+        This method does not refit the model and does not update the target
+        standardizer. It only evaluates the currently fitted belief state.
         """
         if not self.has_model():
             raise RuntimeError('Belief has no fitted model yet.')
@@ -142,7 +209,12 @@ class ScalarFieldBelief:
         return mean.detach().cpu().numpy(), var.detach().cpu().numpy()
 
     def _fit_model(self) -> None:
-        """Fit a fresh exact GP to all currently stored measurements."""
+        """Fit a fresh exact GP to all currently stored measurements.
+
+        The current implementation rebuilds the exact GP from scratch whenever a
+        refit is triggered. This is simple and robust for small domains, but it
+        is not intended as a scalable online GP update method. -> Future work.
+        """
         train_x, train_y = self._build_train_tensors()
 
         likelihood = gpytorch.likelihoods.GaussianLikelihood().to(

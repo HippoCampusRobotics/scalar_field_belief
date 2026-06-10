@@ -1,3 +1,15 @@
+"""Grid and PointCloud2 helpers for scalar field belief visualization.
+
+This module provides small utilities for:
+- generating regular 2D query grids,
+- mapping scalar values to explicit RGB colors,
+- creating RViz-friendly `PointCloud2` messages.
+
+Scalar values are converted to RGB before publishing. This makes the displayed
+colors independent of RViz's intensity-color settings and allows ground-truth
+and belief clouds to use the same color range.
+"""
+
 from __future__ import annotations
 
 import numpy as np
@@ -38,6 +50,38 @@ def _values_to_rgb_uint32(
     color_max: float,
     cmap_name: str = 'viridis',
 ) -> np.ndarray:
+    """Map scalar values to packed 24-bit RGB colors.
+
+    Parameters
+    ----------
+    values
+        Scalar values of shape `(N,)`.
+    color_min
+        Lower bound of the fixed color range.
+    color_max
+        Upper bound of the fixed color range.
+    cmap_name
+        Name of the matplotlib colormap used for color mapping.
+
+    Returns
+    -------
+    np.ndarray
+        Packed RGB values as `uint32`, shape `(N,)`, with layout `0xRRGGBB`.
+
+    Raises
+    ------
+    ValueError
+        If `color_max <= color_min`.
+
+    Notes
+    -----
+    Values below `color_min` are clipped to the low end of the colormap.
+    Values above `color_max` are clipped to the high end.
+
+    The returned values are not yet in the final RViz representation. They are
+    later reinterpreted as `float32` because RViz expects the `rgb` field in a
+    `PointCloud2` message to use a packed floating-point representation.
+    """
     values = np.asarray(values, dtype=np.float32)
 
     if color_max <= color_min:
@@ -70,6 +114,60 @@ def make_field_pointcloud2(
     colormap_max: float = 0.015,
     cmap_name: str = 'viridis',
 ) -> PointCloud2:
+    """Build a PointCloud2 message for scalar field visualization.
+
+    Parameters
+    ----------
+    positions_xy
+        2D point positions of shape `(N, 2)`.
+    values
+        Scalar values of shape `(N,)`.
+    frame_id
+        ROS frame of the point cloud.
+    stamp
+        ROS timestamp for the cloud header.
+    z_mode
+        Vertical visualization mode:
+        - `'flat'`: all points lie on one plane.
+        - `'height'`: values are additionally shown as height.
+    z_offset
+        Constant vertical offset added to all points.
+    height_scale
+        Maximum relative height used when `z_mode == 'height'`.
+    colormap_min
+        Lower bound of the fixed color range.
+    colormap_max
+        Upper bound of the fixed color range.
+    cmap_name
+        Name of the matplotlib colormap used for RGB mapping.
+
+    Returns
+    -------
+    PointCloud2
+        Point cloud with fields `x`, `y`, `z`, and `rgb`.
+
+    Raises
+    ------
+    ValueError
+        If `positions_xy` does not have shape `(N, 2)`.
+    ValueError
+        If `positions_xy` and `values` have different lengths.
+    ValueError
+        If `z_mode` is neither `'flat'` nor `'height'`.
+
+    Notes
+    -----
+    The `'flat'` mode is the standard visualization mode.
+
+    The `'height'` mode is mainly useful for debugging. In this mode, z values
+    are normalized per cloud to the interval `[0, height_scale]` before
+    `z_offset` is added. This makes local structure easier to see, but it also
+    means that heights are relative within one cloud and not directly comparable
+    between different clouds.
+
+    Colors use the fixed range `[colormap_min, colormap_max]`. This is
+    independent of `z_mode`.
+    """
     positions_xy = np.asarray(positions_xy, dtype=np.float32)
     values = np.asarray(values, dtype=np.float32).reshape(-1)
 
@@ -95,6 +193,9 @@ def make_field_pointcloud2(
         cmap_name=cmap_name,
     )
 
+    # RViz expects packed RGB colors in a FLOAT32 field. The uint32 color values
+    # are therefore reinterpreted as float32 without changing the underlying bit
+    # pattern.
     points = np.column_stack(
         [
             positions_xy[:, 0],

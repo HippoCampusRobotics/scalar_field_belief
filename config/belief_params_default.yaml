@@ -11,20 +11,24 @@
     training_iter: 25
     learning_rate: 0.1
 
-    init_lengthscale_x: 0.2
-    init_lengthscale_y: 0.2
+    # we're currently using standardized inputs using the physical bounds of the domain
+    # i.e. with xmax = 2 and ymax = 4, the y lengthscale is expected to be around half the 
+    # x lengthscale 
+    init_lengthscale_x: 0.1
+    init_lengthscale_y: 0.05
     init_outputscale: 1.0
     init_noise: 0.01
 
     refit_policy: every_measurement
     refit_every_k: 1
 
+
+    # visualization 
     publish_visualization: true
     visualization_grid_step: 0.1
     visualization_z_mode: flat
     visualization_height_scale: 0.5
-
-    # visualization only
+    # these parameters are the only runtime-dynamic parameters
     field_color_min: 0.0
     field_color_max: 0.015
     use_fixed_field_color_max: false
