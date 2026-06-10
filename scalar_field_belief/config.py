@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+
 import torch
 
 
@@ -29,7 +30,7 @@ class BeliefConfig:
     visualization_grid_step: float
     visualization_z_mode: str
     visualization_height_scale: float
-    device: str = "cpu"
+    device: str = 'cpu'
     dtype: torch.dtype = torch.float64
 
     @property
@@ -42,41 +43,44 @@ class BeliefConfig:
 
     def validate(self) -> None:
         if self.x_max <= self.x_min:
-            raise ValueError("x_max must be greater than x_min.")
+            raise ValueError('x_max must be greater than x_min.')
         if self.y_max <= self.y_min:
-            raise ValueError("y_max must be greater than y_min.")
+            raise ValueError('y_max must be greater than y_min.')
 
-        if self.kernel_type not in {"rbf", "matern32", "matern52"}:
+        if self.kernel_type not in {'rbf', 'matern32', 'matern52'}:
             raise ValueError(
                 f"Unsupported kernel_type '{self.kernel_type}'. "
                 "Expected one of {'rbf', 'matern32', 'matern52'}."
             )
 
         if self.training_iter <= 0:
-            raise ValueError("training_iter must be positive.")
+            raise ValueError('training_iter must be positive.')
         if self.learning_rate <= 0.0:
-            raise ValueError("learning_rate must be positive.")
+            raise ValueError('learning_rate must be positive.')
 
         if self.init_lengthscale_x <= 0.0:
-            raise ValueError("init_lengthscale_x must be positive.")
+            raise ValueError('init_lengthscale_x must be positive.')
         if self.init_lengthscale_y <= 0.0:
-            raise ValueError("init_lengthscale_y must be positive.")
+            raise ValueError('init_lengthscale_y must be positive.')
         if self.init_outputscale <= 0.0:
-            raise ValueError("init_outputscale must be positive.")
+            raise ValueError('init_outputscale must be positive.')
         if self.init_noise <= 0.0:
-            raise ValueError("init_noise must be positive.")
+            raise ValueError('init_noise must be positive.')
 
-        if self.refit_policy not in {"every_measurement", "every_k_measurements"}:
+        if self.refit_policy not in {
+            'every_measurement',
+            'every_k_measurements',
+        }:
             raise ValueError(
                 f"Unsupported refit_policy '{self.refit_policy}'. "
                 "Expected 'every_measurement' or 'every_k_measurements'."
             )
         if self.refit_every_k <= 0:
-            raise ValueError("refit_every_k must be positive.")
+            raise ValueError('refit_every_k must be positive.')
 
         if self.visualization_grid_step <= 0.0:
-            raise ValueError("visualization_grid_step must be positive.")
-        if self.visualization_z_mode not in {"flat", "height"}:
+            raise ValueError('visualization_grid_step must be positive.')
+        if self.visualization_z_mode not in {'flat', 'height'}:
             raise ValueError(
                 f"Unsupported visualization_z_mode '{self.visualization_z_mode}'. "
                 "Expected 'flat' or 'height'."

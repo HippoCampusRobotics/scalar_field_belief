@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+
+import gpytorch
 import numpy as np
 import torch
-import gpytorch
 
 from scalar_field_belief.config import BeliefConfig
 from scalar_field_belief.models import (
@@ -23,8 +24,9 @@ class FitResult:
 class ScalarFieldBelief:
     """Simple exact-GP belief over a 2D scalar field.
 
-    The belief stores all measurements in physical coordinates, normalizes inputs
-    before passing them to the GP, and standardizes targets during model fitting.
+    The belief stores all measurements in physical coordinates, normalizes
+    inputs before passing them to the GP, and standardizes targets
+    during model fitting.
 
     Notes
     -----
@@ -56,11 +58,13 @@ class ScalarFieldBelief:
         self.standardizer: TargetStandardizer | None = None
 
     def add_measurement(self, x: float, y: float, value: float) -> FitResult:
-        """Add one scalar measurement and refit if required by the current policy."""
+        """Add one scalar measurement and refit if required by the current
+        policy.
+        """
         if not np.isfinite(x) or not np.isfinite(y):
-            raise ValueError("Measurement x/y must be finite.")
+            raise ValueError('Measurement x/y must be finite.')
         if not np.isfinite(value):
-            raise ValueError("Measurement value must be finite.")
+            raise ValueError('Measurement value must be finite.')
 
         xy = np.array([[x, y]], dtype=float)
         val = np.array([value], dtype=float)
@@ -69,7 +73,9 @@ class ScalarFieldBelief:
         self.new_since_last_fit += 1
 
         did_refit = self.maybe_refit()
-        return FitResult(did_refit=did_refit, num_measurements=len(self.y_train))
+        return FitResult(
+            did_refit=did_refit, num_measurements=len(self.y_train)
+        )
 
     def maybe_refit(self) -> bool:
         """Refit the GP if the configured refit policy says so."""
@@ -77,12 +83,14 @@ class ScalarFieldBelief:
             return False
 
         should_refit = False
-        if self.config.refit_policy == "every_measurement":
+        if self.config.refit_policy == 'every_measurement':
             should_refit = True
-        elif self.config.refit_policy == "every_k_measurements":
+        elif self.config.refit_policy == 'every_k_measurements':
             should_refit = self.new_since_last_fit >= self.config.refit_every_k
         else:
-            raise ValueError(f"Unknown refit_policy: {self.config.refit_policy}")
+            raise ValueError(
+                f'Unknown refit_policy: {self.config.refit_policy}'
+            )
 
         if not should_refit:
             return False
@@ -100,15 +108,19 @@ class ScalarFieldBelief:
         )
 
     def query(self, xy_phys: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Query posterior latent mean and variance at physical `(x, y)` positions."""
+        """Query posterior latent mean and variance at physical `(x, y)`
+        positions.
+        """
         if not self.has_model():
-            raise RuntimeError("Belief has no fitted model yet.")
+            raise RuntimeError('Belief has no fitted model yet.')
 
         xy_phys = np.asarray(xy_phys, dtype=float)
         if xy_phys.ndim != 2 or xy_phys.shape[1] != 2:
-            raise ValueError(f"xy_phys must have shape (N, 2), got {xy_phys.shape}")
+            raise ValueError(
+                f'xy_phys must have shape (N, 2), got {xy_phys.shape}'
+            )
         if not np.all(np.isfinite(xy_phys)):
-            raise ValueError("xy_phys must contain only finite values.")
+            raise ValueError('xy_phys must contain only finite values.')
 
         query_x = self._build_query_tensor(xy_phys)
 
@@ -124,14 +136,18 @@ class ScalarFieldBelief:
             mean_norm = posterior.mean
             var_norm = posterior.variance
 
-        mean, var = self.standardizer.inverse_transform_mean_var(mean_norm, var_norm)
+        mean, var = self.standardizer.inverse_transform_mean_var(
+            mean_norm, var_norm
+        )
         return mean.detach().cpu().numpy(), var.detach().cpu().numpy()
 
     def _fit_model(self) -> None:
         """Fit a fresh exact GP to all currently stored measurements."""
         train_x, train_y = self._build_train_tensors()
 
-        likelihood = gpytorch.likelihoods.GaussianLikelihood().to(self.config.device)
+        likelihood = gpytorch.likelihoods.GaussianLikelihood().to(
+            self.config.device
+        )
         covar_module = build_covar_module(self.config.kernel_type).to(
             self.config.device
         )
@@ -152,7 +168,9 @@ class ScalarFieldBelief:
 
         model.train()
         likelihood.train()
-        optimizer = torch.optim.Adam(model.parameters(), lr=self.config.learning_rate)
+        optimizer = torch.optim.Adam(
+            model.parameters(), lr=self.config.learning_rate
+        )
         mll = gpytorch.mlls.ExactMarginalLogLikelihood(likelihood, model)
 
         for _ in range(self.config.training_iter):
@@ -169,11 +187,11 @@ class ScalarFieldBelief:
         """Build normalized training inputs and standardized training targets.
 
         This method is used only during fitting. It also updates
-        `self.standardizer`, because target standardization is part of the fitted
-        training state.
+        `self.standardizer`, because target standardization is part of the
+        fitted training state.
         """
         if len(self.y_train) == 0:
-            raise RuntimeError("Cannot build tensors without training data.")
+            raise RuntimeError('Cannot build tensors without training data.')
 
         xy_train_norm = self.normalizer.transform(self.xy_train_phys)
         train_x = torch.as_tensor(
@@ -195,16 +213,16 @@ class ScalarFieldBelief:
         """Build normalized query inputs for posterior evaluation.
 
         This method is intentionally read-only with respect to the belief state.
-        In particular, it does not rebuild training tensors and does not refit the
-        target standardizer.
+        In particular, it does not rebuild training tensors and does not refit
+        the target standardizer.
         """
         query_xy_phys = np.asarray(query_xy_phys, dtype=float)
         if query_xy_phys.ndim != 2 or query_xy_phys.shape[1] != 2:
             raise ValueError(
-                f"query_xy_phys must have shape (N, 2), got {query_xy_phys.shape}"
+                f'query_xy_phys must have shape (N, 2), got {query_xy_phys.shape}'
             )
         if not np.all(np.isfinite(query_xy_phys)):
-            raise ValueError("query_xy_phys must contain only finite values.")
+            raise ValueError('query_xy_phys must contain only finite values.')
 
         query_xy_norm = self.normalizer.transform(query_xy_phys)
         query_x = torch.as_tensor(

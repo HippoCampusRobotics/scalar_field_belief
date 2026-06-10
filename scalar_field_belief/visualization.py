@@ -1,17 +1,17 @@
 from __future__ import annotations
 
 import numpy as np
-from std_msgs.msg import Header
+from matplotlib import colormaps
 from sensor_msgs.msg import PointCloud2, PointField
 from sensor_msgs_py import point_cloud2
-from matplotlib import colormaps
+from std_msgs.msg import Header
 
 
 def make_axis(start: float, stop: float, step: float) -> np.ndarray:
     if stop <= start:
-        raise ValueError("Axis stop must be larger than start.")
+        raise ValueError('Axis stop must be larger than start.')
     if step <= 0.0:
-        raise ValueError("Axis step must be positive.")
+        raise ValueError('Axis step must be positive.')
     n_full_steps = int(np.floor((stop - start) / step))
     axis = start + step * np.arange(n_full_steps + 1, dtype=np.float64)
     if not np.isclose(axis[-1], stop):
@@ -36,12 +36,12 @@ def _values_to_rgb_uint32(
     values: np.ndarray,
     color_min: float,
     color_max: float,
-    cmap_name: str = "viridis",
+    cmap_name: str = 'viridis',
 ) -> np.ndarray:
     values = np.asarray(values, dtype=np.float32)
 
     if color_max <= color_min:
-        raise ValueError("color_max must be greater than color_min.")
+        raise ValueError('color_max must be greater than color_min.')
 
     normalized = (values - color_min) / (color_max - color_min)
     normalized = np.clip(normalized, 0.0, 1.0)
@@ -63,24 +63,24 @@ def make_field_pointcloud2(
     values: np.ndarray,
     frame_id: str,
     stamp,
-    z_mode: str = "flat",
+    z_mode: str = 'flat',
     z_offset: float = -0.6,
     height_scale: float = 1.0,
     colormap_min: float = 0.0,
     colormap_max: float = 0.015,
-    cmap_name: str = "viridis",
+    cmap_name: str = 'viridis',
 ) -> PointCloud2:
     positions_xy = np.asarray(positions_xy, dtype=np.float32)
     values = np.asarray(values, dtype=np.float32).reshape(-1)
 
     if positions_xy.ndim != 2 or positions_xy.shape[1] != 2:
-        raise ValueError("positions_xy must have shape (N, 2).")
+        raise ValueError('positions_xy must have shape (N, 2).')
     if len(positions_xy) != len(values):
-        raise ValueError("positions_xy and values must have matching length.")
+        raise ValueError('positions_xy and values must have matching length.')
 
-    if z_mode == "flat":
+    if z_mode == 'flat':
         z = np.zeros(len(values), dtype=np.float32)
-    elif z_mode == "height":
+    elif z_mode == 'height':
         vmin = float(values.min())
         vmax = float(values.max())
         denom = max(vmax - vmin, 1e-12)
@@ -105,11 +105,11 @@ def make_field_pointcloud2(
     ).astype(np.float32, copy=False)
 
     fields = [
-        PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
-        PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
-        PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
+        PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
+        PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
+        PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
         # PointField(name="intensity", offset=12, datatype=PointField.FLOAT32, count=1),
-        PointField(name="rgb", offset=12, datatype=PointField.FLOAT32, count=1),
+        PointField(name='rgb', offset=12, datatype=PointField.FLOAT32, count=1),
     ]
 
     header = Header()

@@ -5,7 +5,13 @@ import torch
 
 
 class ExactFieldGP(gpytorch.models.ExactGP):
-    def __init__(self, train_x: torch.Tensor, train_y: torch.Tensor, likelihood, covar_module):
+    def __init__(
+        self,
+        train_x: torch.Tensor,
+        train_y: torch.Tensor,
+        likelihood,
+        covar_module,
+    ):
         super().__init__(train_x, train_y, likelihood)
         self.mean_module = gpytorch.means.ConstantMean()
         self.covar_module = covar_module
@@ -17,14 +23,14 @@ class ExactFieldGP(gpytorch.models.ExactGP):
 
 
 def build_covar_module(kernel_type: str):
-    if kernel_type == "rbf":
+    if kernel_type == 'rbf':
         spatial_kernel = gpytorch.kernels.RBFKernel(ard_num_dims=2)
-    elif kernel_type == "matern32":
+    elif kernel_type == 'matern32':
         spatial_kernel = gpytorch.kernels.MaternKernel(nu=1.5, ard_num_dims=2)
-    elif kernel_type == "matern52":
+    elif kernel_type == 'matern52':
         spatial_kernel = gpytorch.kernels.MaternKernel(nu=2.5, ard_num_dims=2)
     else:
-        raise ValueError(f"Unknown kernel_type: {kernel_type}")
+        raise ValueError(f'Unknown kernel_type: {kernel_type}')
     return gpytorch.kernels.ScaleKernel(spatial_kernel)
 
 
@@ -46,4 +52,6 @@ def initialize_model_hyperparameters(
         dtype=train_x.dtype,
         device=train_x.device,
     )
-    likelihood.noise = torch.tensor(init_noise, dtype=train_x.dtype, device=train_x.device)
+    likelihood.noise = torch.tensor(
+        init_noise, dtype=train_x.dtype, device=train_x.device
+    )
