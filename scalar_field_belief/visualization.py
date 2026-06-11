@@ -217,3 +217,100 @@ def make_field_pointcloud2(
     header.stamp = stamp
     header.frame_id = frame_id
     return point_cloud2.create_cloud(header, fields, points)
+
+
+def make_intensity_pointcloud2(
+    positions_xy: np.ndarray,
+    values: np.ndarray,
+    frame_id: str,
+    stamp,
+    z_mode: str = 'flat',
+    z_offset: float = -0.6,
+    height_scale: float = 1.0,
+) -> PointCloud2:
+    """Build a PointCloud2 message for scalar field visualization.
+
+    Parameters
+    ----------
+    positions_xy
+        2D point positions of shape `(N, 2)`.
+    values
+        Scalar values of shape `(N,)`.
+    frame_id
+        ROS frame of the point cloud.
+    stamp
+        ROS timestamp for the cloud header.
+    z_mode
+        Vertical visualization mode:
+        - `'flat'`: all points lie on one plane.
+        - `'height'`: values are additionally shown as height.
+    z_offset
+        Constant vertical offset added to all points.
+    height_scale
+        Maximum relative height used when `z_mode == 'height'`.
+
+    Returns
+    -------
+    PointCloud2
+        Point cloud with fields `x`, `y`, `z`, and `intensity`.
+
+    Raises
+    ------
+    ValueError
+        If `positions_xy` does not have shape `(N, 2)`.
+    ValueError
+        If `positions_xy` and `values` have different lengths.
+    ValueError
+        If `z_mode` is neither `'flat'` nor `'height'`.
+
+    Notes
+    -----
+    The `'flat'` mode is the standard visualization mode.
+
+    The `'height'` mode is mainly useful for debugging. In this mode, z values
+    are normalized per cloud to the interval `[0, height_scale]` before
+    `z_offset` is added. This makes local structure easier to see, but it also
+    means that heights are relative within one cloud and not directly comparable
+    between different clouds.
+
+    """
+    positions_xy = np.asarray(positions_xy, dtype=np.float32)
+    values = np.asarray(values, dtype=np.float32).reshape(-1)
+
+    if positions_xy.ndim != 2 or positions_xy.shape[1] != 2:
+        raise ValueError('positions_xy must have shape (N, 2).')
+    if len(positions_xy) != len(values):
+        raise ValueError('positions_xy and values must have matching length.')
+
+    if z_mode == 'flat':
+        z = np.zeros(len(values), dtype=np.float32)
+    elif z_mode == 'height':
+        vmin = float(values.min())
+        vmax = float(values.max())
+        denom = max(vmax - vmin, 1e-12)
+        z = ((values - vmin) / denom * height_scale).astype(np.float32)
+    else:
+        raise ValueError("z_mode must be 'flat' or 'height'.")
+
+    points = np.column_stack(
+        [
+            positions_xy[:, 0],
+            positions_xy[:, 1],
+            z + z_offset,
+            values,
+        ]
+    ).astype(np.float32, copy=False)
+
+    fields = [
+        PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
+        PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
+        PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
+        PointField(
+            name='intensity', offset=12, datatype=PointField.FLOAT32, count=1
+        ),
+    ]
+
+    header = Header()
+    header.stamp = stamp
+    header.frame_id = frame_id
+    return point_cloud2.create_cloud(header, fields, points)

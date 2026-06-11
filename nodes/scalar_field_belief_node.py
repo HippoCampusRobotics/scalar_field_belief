@@ -53,6 +53,7 @@ from scalar_field_belief.config import BeliefConfig
 from scalar_field_belief.visualization import (
     make_field_pointcloud2,
     make_grid_positions,
+    make_intensity_pointcloud2,
 )
 
 
@@ -484,7 +485,7 @@ class ScalarFieldBeliefNode(Node):
             colormap_max=effective_color_max,
             height_scale=self.config.visualization_height_scale,
         )
-        var_cloud = make_field_pointcloud2(
+        var_cloud = make_intensity_pointcloud2(
             positions_xy=grid_xy,
             values=variance,
             frame_id=self.config.frame_id,
