@@ -11,6 +11,7 @@ The current version is intentionally simple:
 - fixed physical input normalization bounds
 - target standardization from observed measurement values
 - query service for latent posterior mean and variance
+- query service for latent posterior mean and full covariance matrix
 - RViz point clouds for mean and variance visualization
 
 It is designed to work together with:
@@ -180,6 +181,20 @@ scalar_field_interfaces/srv/QueryScalarFieldBelief
 Queries the current GP belief at a batch of poses and returns posterior mean and variance.
 
 ```text
+/<vehicle_name>/query_scalar_field_belief_covariance
+```
+
+Type:
+
+```text
+scalar_field_interfaces/srv/QueryScalarFieldBeliefCovariance
+```
+
+Queries the current GP belief at a batch of poses and returns posterior mean and full covariance matrix instead of just the diagonal (variance).
+
+> `covariance_matrix` is flattened because ROS messages can only hold 1D arrays, not a real N x N grid. For two points, the 4 numbers come back in this order: point 1 vs point 1, point 1 vs point 2, point 2 vs point 1, point 2 vs point 2. With more points, the same pattern continues: the whole first row comes first, then the whole second row, and so on.
+
+```text
 /<vehicle_name>/reset_scalar_field_belief
 ```
 
@@ -212,7 +227,7 @@ ros2 topic pub --once /uuv00/ir_measurement \
 
 With the default `refit_policy: every_measurement`, the node should fit a GP immediately after receiving the first measurement.
 
-#### Query the belief
+#### Query the belief for mean and variance
 
 ```bash
 ros2 service call /uuv00/query_scalar_field_belief \
@@ -221,6 +236,16 @@ ros2 service call /uuv00/query_scalar_field_belief \
 ```
 
 If no fitted model exists yet, the service returns `success: false`.
+
+#### Query the belief for mean and full covariance matrix
+
+```bash
+ros2 service call /uuv00/query_scalar_field_belief_covariance \
+  scalar_field_interfaces/srv/QueryScalarFieldBeliefCovariance \
+  "{queries: [{header: {frame_id: 'map'}, pose: {position: {x: 1.0, y: 2.0, z: 0.0}, orientation: {w: 1.0}}}, {header: {frame_id: 'map'}, pose: {position: {x: 1.1, y: 2.0, z: 0.0}, orientation: {w: 1.0}}}]}"
+```
+
+If no fitted model exists yet, the service returns `success: false` as well.
 
 #### Reset the belief
 
