@@ -101,6 +101,12 @@ class TargetStandardizer:
         var = var_norm * (self.std**2)
         return mean, var
 
+    def inverse_transform_covar(self, covar_norm: torch.Tensor) -> torch.Tensor:
+        # Same rescaling as inverse_transform_mean_var, applied to the whole
+        # matrix: y_std = (y - mean) / std, so Cov(y) = Cov(y_std) * std**2
+        # for every entry, not just the diagonal.
+        return covar_norm * (self.std**2)
+
 
 @dataclass(frozen=True)
 class InputNormalizer2d:

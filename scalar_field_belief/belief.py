@@ -208,6 +208,62 @@ class ScalarFieldBelief:
         )
         return mean.detach().cpu().numpy(), var.detach().cpu().numpy()
 
+    def query_with_covariance(
+        self, xy_phys: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Query posterior mean and full covariance at physical positions.
+
+        Unlike `query()`, this returns the full (N, N) covariance matrix, not
+        just the diagonal.
+
+        Parameters
+        ----------
+        xy_phys
+            Physical query positions with shape `(N, 2)`.
+
+        Returns
+        -------
+        tuple[np.ndarray, np.ndarray]
+            Posterior mean `(N,)` and posterior covariance `(N, N)`, in
+            original measurement units.
+
+        Raises
+        ------
+        RuntimeError
+            If no fitted model is available yet.
+        ValueError
+            If `xy_phys` does not have shape `(N, 2)` or contains non-finite
+            values.
+        """
+        if not self.has_model():
+            raise RuntimeError('Belief has no fitted model yet.')
+
+        xy_phys = np.asarray(xy_phys, dtype=float)
+        if xy_phys.ndim != 2 or xy_phys.shape[1] != 2:
+            raise ValueError(
+                f'xy_phys must have shape (N, 2), got {xy_phys.shape}'
+            )
+        if not np.all(np.isfinite(xy_phys)):
+            raise ValueError('xy_phys must contain only finite values.')
+
+        query_x = self._build_query_tensor(xy_phys)
+
+        assert self.model is not None
+        assert self.likelihood is not None
+        assert self.standardizer is not None
+
+        self.model.eval()
+        self.likelihood.eval()
+
+        with torch.no_grad(), gpytorch.settings.fast_pred_var():
+            posterior = self.model(query_x)
+            mean_norm = posterior.mean
+            covar_norm = posterior.covariance_matrix
+
+        mean = mean_norm * self.standardizer.std + self.standardizer.mean
+        covar = self.standardizer.inverse_transform_covar(covar_norm)
+        return mean.detach().cpu().numpy(), covar.detach().cpu().numpy()
+
     def _fit_model(self) -> None:
         """Fit a fresh exact GP to all currently stored measurements.
 

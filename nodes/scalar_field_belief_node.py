@@ -14,6 +14,9 @@ Services
 `query_scalar_field_belief`
     Query posterior mean and variance at requested poses.
 
+`query_scalar_field_belief_covariance`
+    Query posterior mean and full covariance at requested poses.
+
 `reset_scalar_field_belief`
     Clear all stored measurements and fitted GP state.
 
@@ -44,7 +47,10 @@ from rclpy.qos import (
     ReliabilityPolicy,
 )
 from scalar_field_interfaces.msg import ScalarMeasurement
-from scalar_field_interfaces.srv import QueryScalarFieldBelief
+from scalar_field_interfaces.srv import (
+    QueryScalarFieldBelief,
+    QueryScalarFieldBeliefCovariance,
+)
 from sensor_msgs.msg import PointCloud2
 from std_srvs.srv import Trigger
 
@@ -117,6 +123,11 @@ class ScalarFieldBeliefNode(Node):
             QueryScalarFieldBelief,
             'query_scalar_field_belief',
             self._handle_query,
+        )
+        self.query_covariance_srv = self.create_service(
+            QueryScalarFieldBeliefCovariance,
+            'query_scalar_field_belief_covariance',
+            self._handle_query_covariance,
         )
         self.reset_srv = self.create_service(
             Trigger,
@@ -431,6 +442,49 @@ class ScalarFieldBeliefNode(Node):
         response.success = True
         response.mean = mean.tolist()
         response.variance = variance.tolist()
+        response.status_message = 'ok'
+        return response
+
+    def _handle_query_covariance(self, request, response):
+        """Handle a posterior covariance query. Same validation as
+        _handle_query, but returns the full covariance matrix, not just
+        the diagonal variance."""
+        if len(request.queries) == 0:
+            response.success = False
+            response.status_message = 'No query poses provided.'
+            return response
+        if not self.belief.has_model():
+            response.success = False
+            response.status_message = 'Belief has no fitted model yet.'
+            return response
+
+        xy = []
+        for pose_stamped in request.queries:
+            frame_id = pose_stamped.header.frame_id or self.config.frame_id
+            if frame_id != self.config.frame_id:
+                response.success = False
+                response.status_message = (
+                    f"Expected frame '{self.config.frame_id}'"
+                    + f", got '{frame_id}'."
+                )
+                return response
+            xy.append(
+                [pose_stamped.pose.position.x, pose_stamped.pose.position.y]
+            )
+
+        try:
+            mean, covariance = self.belief.query_with_covariance(
+                np.asarray(xy, dtype=float)
+            )
+        except Exception as exc:
+            self.get_logger().error(f'Belief covariance query failed: {exc}')
+            response.success = False
+            response.status_message = f'Belief covariance query failed: {exc}'
+            return response
+
+        response.success = True
+        response.mean = mean.tolist()
+        response.covariance_matrix = covariance.flatten().tolist()
         response.status_message = 'ok'
         return response
 
