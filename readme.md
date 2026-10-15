@@ -194,6 +194,8 @@ Queries the current GP belief at a batch of poses and returns posterior mean and
 
 > `covariance_matrix` is flattened because ROS messages can only hold 1D arrays, not a real N x N grid. For two points, the 4 numbers come back in this order: point 1 vs point 1, point 1 vs point 2, point 2 vs point 1, point 2 vs point 2. With more points, the same pattern continues: the whole first row comes first, then the whole second row, and so on.
 
+> The response also includes `measurement_noise_variance`, the GP's likelihood noise (sigma_n^2) in the same physical units as `covariance_matrix`. Callers simulating a new noisy measurement at a queried pose should add this to the relevant diagonal entries before conditioning, instead of assuming their own noise value.
+
 ```text
 /<vehicle_name>/reset_scalar_field_belief
 ```

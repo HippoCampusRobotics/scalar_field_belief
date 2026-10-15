@@ -55,6 +55,14 @@ class BeliefConfig:
         Number of new measurements required before refitting when
         `refit_policy == 'every_k_measurements'`.
 
+    optimize_hyperparameters
+        Whether a refit runs gradient-based hyperparameter optimization
+        (Adam over `training_iter` steps). If `False`, the kernel
+        lengthscales, outputscale, and likelihood noise stay fixed at their
+        `init_*` values, but the GP is still rebuilt against all currently
+        stored measurements on every refit, so the posterior mean/variance
+        keep adapting to new data.
+
     publish_visualization
         Whether the node should publish belief visualization point clouds.
 
@@ -98,6 +106,7 @@ class BeliefConfig:
 
     refit_policy: str
     refit_every_k: int
+    optimize_hyperparameters: bool
 
     publish_visualization: bool
     visualization_grid_step: float

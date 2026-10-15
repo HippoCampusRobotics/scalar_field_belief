@@ -188,6 +188,9 @@ class ScalarFieldBeliefNode(Node):
         )
         self.declare_parameter('refit_every_k', 1, self._static_descriptor())
         self.declare_parameter(
+            'optimize_hyperparameters', True, self._static_descriptor()
+        )
+        self.declare_parameter(
             'publish_visualization', True, self._static_descriptor()
         )
         self.declare_parameter(
@@ -351,6 +354,9 @@ class ScalarFieldBeliefNode(Node):
             init_noise=float(self.get_parameter('init_noise').value),
             refit_policy=self.get_parameter('refit_policy').value,
             refit_every_k=int(self.get_parameter('refit_every_k').value),
+            optimize_hyperparameters=bool(
+                self.get_parameter('optimize_hyperparameters').value
+            ),
             publish_visualization=bool(
                 self.get_parameter('publish_visualization').value
             ),
@@ -394,7 +400,7 @@ class ScalarFieldBeliefNode(Node):
                 f'Received measurement at ({x:.3f}, {y:.3f}) = {value:.6f}; '
                 f'N={result.num_measurements}, refit={result.did_refit}'
             )
-            if result.did_refit and self.config.publish_visualization:
+            if self.belief.has_model() and self.config.publish_visualization:
                 self._publish_visualization()
         except Exception as exc:
             self.get_logger().error(
@@ -485,6 +491,9 @@ class ScalarFieldBeliefNode(Node):
         response.success = True
         response.mean = mean.tolist()
         response.covariance_matrix = covariance.flatten().tolist()
+        response.measurement_noise_variance = (
+            self.belief.measurement_noise_variance()
+        )
         response.status_message = 'ok'
         return response
 

@@ -1,0 +1,45 @@
+/**:
+  ros__parameters:
+    frame_id: map
+
+    x_min: 0.0
+    x_max: 2.0
+    y_min: 0.0
+    y_max: 4.0
+
+    kernel_type: rbf
+    training_iter: 25
+    learning_rate: 0.1
+
+    # Same starting lengthscale as belief_params_default.yaml - this belief
+    # is NOT re-initialized per field. It's tuned once (like in real life)
+    # and then used as-is against fields whose true sigma_x/sigma_y may or
+    # may not still match it (see experiment_02_gp_mismatch/00_generate_fields.py).
+    #
+    # Inputs are normalized by the domain bounds before hitting the kernel, so
+    # these are fractions of the domain size, not meters: 0.18 / 2.0 = 0.09 (x),
+    # 0.18 / 4.0 = 0.045 (y) matches the field's REFERENCE_SIGMA of 0.18 m.
+    init_lengthscale_x: 0.09
+    init_lengthscale_y: 0.045
+    init_outputscale: 1.0
+    init_noise: 0.01
+
+    refit_policy: every_k_measurements
+    # Unlike belief_params_default.yaml, this belief keeps re-fitting its
+    # hyperparameters every 20 measurements - this is what lets it notice
+    # when the field's true sigma doesn't match its starting guess and
+    # correct for it over the course of a mission.
+    refit_every_k: 20
+    optimize_hyperparameters: true
+
+
+    # visualization
+    publish_visualization: true
+    visualization_grid_step: 0.1
+    visualization_z_mode: flat
+    visualization_height_scale: 0.5
+    # these parameters are the only runtime-dynamic parameters
+    field_color_min: 0.0
+    field_color_max: 0.015
+    use_fixed_field_color_max: false
+    z_offset: -0.8

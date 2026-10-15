@@ -11,16 +11,23 @@
     training_iter: 25
     learning_rate: 0.1
 
-    # we're currently using standardized inputs using the physical bounds of the domain
-    # i.e. with xmax = 2 and ymax = 4, the y lengthscale is expected to be around half the 
-    # x lengthscale 
-    init_lengthscale_x: 0.1
-    init_lengthscale_y: 0.05
+    # inputs are normalized by the physical domain bounds before hitting the
+    # kernel (x_norm = (x - x_min) / (x_max - x_min)), so these lengthscales
+    # are fractions of the domain size, not meters. To match the field's true
+    # spatial correlation length (0.18 m, see REFERENCE_SIGMA in
+    # official_scripts/*/00_generate_fields.py) with xmax=2 and ymax=4:
+    # 0.18 / 2.0 = 0.09 (x), 0.18 / 4.0 = 0.045 (y)
+    init_lengthscale_x: 0.09
+    init_lengthscale_y: 0.045
     init_outputscale: 1.0
     init_noise: 0.01
 
-    refit_policy: every_measurement
+    refit_policy: every_k_measurements
     refit_every_k: 1
+    # if false, init_lengthscale_x/y, init_outputscale, and init_noise stay
+    # fixed (no Adam training loop); the posterior still updates on every
+    # refit since the GP is rebuilt against all current measurements
+    optimize_hyperparameters: false
 
 
     # visualization 

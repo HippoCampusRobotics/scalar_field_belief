@@ -116,6 +116,9 @@ class ScalarFieldBelief:
         self.new_since_last_fit += 1
 
         did_refit = self.maybe_refit()
+        if not did_refit and self.has_model():
+            self._condition_on_data()
+
         return FitResult(
             did_refit=did_refit, num_measurements=len(self.y_train)
         )
@@ -264,12 +267,91 @@ class ScalarFieldBelief:
         covar = self.standardizer.inverse_transform_covar(covar_norm)
         return mean.detach().cpu().numpy(), covar.detach().cpu().numpy()
 
-    def _fit_model(self) -> None:
-        """Fit a fresh exact GP to all currently stored measurements.
+    def measurement_noise_variance(self) -> float:
+        """Return the GP likelihood noise variance (sigma_n^2) in physical
+        measurement units.
 
-        The current implementation rebuilds the exact GP from scratch whenever a
-        refit is triggered. This is simple and robust for small domains, but it
-        is not intended as a scalable online GP update method. -> Future work.
+        Raises
+        ------
+        RuntimeError
+            If no fitted model is available yet.
+        """
+        if not self.has_model():
+            raise RuntimeError('Belief has no fitted model yet.')
+
+        assert self.likelihood is not None
+        assert self.standardizer is not None
+
+        noise_norm = self.likelihood.noise.detach()
+        return float((noise_norm * self.standardizer.std**2).item())
+
+    def fitted_hyperparameters_physical(self) -> dict[str, float]:
+        """Return the currently fitted GP kernel hyperparameters in physical
+        units: lengthscale_x_m/lengthscale_y_m (meters, via the domain
+        extent), outputscale (measurement units squared, via
+        standardizer.std**2 - same convention as measurement_noise_variance()),
+        and noise_variance (measurement units squared).
+
+        Raises
+        ------
+        RuntimeError
+            If no fitted model is available yet.
+        """
+        if not self.has_model():
+            raise RuntimeError('Belief has no fitted model yet.')
+        assert self.model is not None
+        assert self.standardizer is not None
+
+        lengthscale_norm = self.model.covar_module.base_kernel.lengthscale.detach()
+        x_extent = self.normalizer.x_max - self.normalizer.x_min
+        y_extent = self.normalizer.y_max - self.normalizer.y_min
+        std2 = float(self.standardizer.std**2)
+        return {
+            'lengthscale_x_m': float(lengthscale_norm[0, 0]) * x_extent,
+            'lengthscale_y_m': float(lengthscale_norm[0, 1]) * y_extent,
+            'outputscale': float(self.model.covar_module.outputscale.detach()) * std2,
+            'noise_variance': self.measurement_noise_variance(),
+        }
+
+    def _condition_on_data(self) -> None:
+        """Update the current model's conditioning set from all stored measurements.
+
+        Unlike `_fit_model`, this does not rebuild the model and does not
+        touch kernel or likelihood hyperparameters. It does recompute the
+        target standardizer from all current measurements (a cheap mean/std
+        recompute, not a gradient-based operation): freezing the
+        standardizer between refits previously caused a severe scale
+        mismatch once the model's fixed `init_outputscale`/`init_noise`
+        (defined in standardized target units) were interpreted against a
+        stale standardizer fit from very few points. Recomputing it here on
+        every measurement, while leaving kernel hyperparameters untouched,
+        keeps posterior queries reflecting every measurement between
+        refits, while `refit_policy`/`refit_every_k` continue to control
+        only the (expensive) hyperparameter re-optimization cadence.
+        """
+        assert self.model is not None
+
+        train_x, train_y = self._build_train_tensors()
+        self.model.set_train_data(inputs=train_x, targets=train_y, strict=False)
+
+    def _fit_model(self) -> None:
+        """Rebuild the exact GP against all currently stored measurements.
+
+        The exact GP is always rebuilt from scratch whenever a refit is
+        triggered. This is simple and robust for small domains, but it is not
+        intended as a scalable online GP update method. -> Future work.
+
+        If `config.optimize_hyperparameters` is `False`, the kernel
+        hyperparameters stay fixed at their `init_*` values (no Adam
+        training loop) and only the training data changes, so the posterior
+        is conditioned on the new data without ever re-optimizing the prior.
+
+        Between refits, `_condition_on_data` keeps the existing model
+        conditioned on newly added measurements without rebuilding the model
+        or touching its kernel/likelihood hyperparameters; this method is
+        only reached when the refit policy actually fires, and additionally
+        (re-)optimizes those hyperparameters when `optimize_hyperparameters`
+        is `True`.
         """
         train_x, train_y = self._build_train_tensors()
 
@@ -294,19 +376,20 @@ class ScalarFieldBelief:
             init_noise=self.config.init_noise,
         )
 
-        model.train()
-        likelihood.train()
-        optimizer = torch.optim.Adam(
-            model.parameters(), lr=self.config.learning_rate
-        )
-        mll = gpytorch.mlls.ExactMarginalLogLikelihood(likelihood, model)
+        if self.config.optimize_hyperparameters:
+            model.train()
+            likelihood.train()
+            optimizer = torch.optim.Adam(
+                model.parameters(), lr=self.config.learning_rate
+            )
+            mll = gpytorch.mlls.ExactMarginalLogLikelihood(likelihood, model)
 
-        for _ in range(self.config.training_iter):
-            optimizer.zero_grad()
-            output = model(train_x)
-            loss = -mll(output, train_y)
-            loss.backward()
-            optimizer.step()
+            for _ in range(self.config.training_iter):
+                optimizer.zero_grad()
+                output = model(train_x)
+                loss = -mll(output, train_y)
+                loss.backward()
+                optimizer.step()
 
         self.model = model
         self.likelihood = likelihood
@@ -314,9 +397,9 @@ class ScalarFieldBelief:
     def _build_train_tensors(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Build normalized training inputs and standardized training targets.
 
-        This method is used only during fitting. It also updates
-        `self.standardizer`, because target standardization is part of the
-        fitted training state.
+        This method is used by both `_fit_model` and `_condition_on_data`. It
+        also updates `self.standardizer`, because target standardization is
+        recomputed from all current measurements every time this is called.
         """
         if len(self.y_train) == 0:
             raise RuntimeError('Cannot build tensors without training data.')

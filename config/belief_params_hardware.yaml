@@ -1,0 +1,40 @@
+/**:
+  ros__parameters:
+    frame_id: map
+
+    x_min: 0.0
+    x_max: 2.0
+    y_min: 0.0
+    y_max: 4.0
+
+    kernel_type: rbf
+    training_iter: 25
+    learning_rate: 0.1
+
+    # inputs are normalized by the physical domain bounds before hitting the
+    # kernel (x_norm = (x - x_min) / (x_max - x_min)), so these lengthscales
+    # are fractions of the domain size, not meters. To match a 0.31 m
+    # spatial correlation length with xmax=2 and ymax=4:
+    # 0.31 / 2.0 = 0.155 (x), 0.31 / 4.0 = 0.0775 (y)
+    init_lengthscale_x: 0.155
+    init_lengthscale_y: 0.0775
+    init_outputscale: 1.0
+    init_noise: 0.01
+
+    refit_policy: every_k_measurements
+    # unlike belief_params_default.yaml, this belief re-optimizes its kernel
+    # hyperparameters every 20 measurements instead of staying fixed
+    refit_every_k: 20
+    optimize_hyperparameters: true
+
+
+    # visualization
+    publish_visualization: true
+    visualization_grid_step: 0.1
+    visualization_z_mode: flat
+    visualization_height_scale: 0.5
+    # these parameters are the only runtime-dynamic parameters
+    field_color_min: 0.0
+    field_color_max: 0.015
+    use_fixed_field_color_max: false
+    z_offset: -1.0
