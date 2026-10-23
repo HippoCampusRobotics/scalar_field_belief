@@ -1,0 +1,30 @@
+# Copyright (C) 2026 Nathalie Bauschmann
+# SPDX-License-Identifier: GPL-3.0-only
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, version 3 of the License.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(Eigen3 3.3 NO_MODULE)
+
+set(scalar_field_belief_gmrf_HAS_TOML @GMRF_HAS_TOML@)
+if(scalar_field_belief_gmrf_HAS_TOML)
+  # The static TOML loader links toml++ privately; consumers still need it at link time.
+  find_dependency(tomlplusplus CONFIG)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/scalar_field_belief_gmrfTargets.cmake")
+
+# Targets: scalar_field_belief::gmrf, scalar_field_belief::gmrf_toml (if HAS_TOML)
+check_required_components(scalar_field_belief_gmrf)

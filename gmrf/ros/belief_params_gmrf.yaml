@@ -1,0 +1,45 @@
+# Parameters of the GMRF belief node (gmrf_belief_node). All parameters are
+# static (read-only): change them here and restart the node.
+#
+# Units: positions in meters in frame_id; "units" = measurement units of the
+# scalar value. All sigma_* values are STANDARD DEVIATIONS (not variances).
+/**:
+  ros__parameters:
+    frame_id: map
+
+    # Domain [m] and grid. Nodes at x_min + i*dx, i = 0..nx-1, with
+    # dx = (x_max - x_min)/(nx - 1) (same for y); domain edges are nodes.
+    x_min: 0.0
+    x_max: 2.0
+    y_min: 0.0
+    y_max: 4.0
+    nx: 41            # dx = 0.05 m
+    ny: 81            # dy = 0.05 m
+
+    # Scalar field model (stationary, scalar-only; no flow, no aging).
+    prior_mean: 0.0       # [units]
+    prior_sigma: 0.01     # per-node prior std [units]
+    # Std of the difference between neighbouring nodes is
+    # sigma_p_per_m * dx^2 (source formula, dx used for x AND y edges):
+    # 0.8 * 0.05^2 = 0.002 [units] per 0.05 m edge.
+    sigma_p_per_m: 0.8    # [units / m^2]
+    sigma_s: 0.0005       # measurement noise std [units];
+                          # measurement_noise_variance = sigma_s^2
+
+    # Walls in frame_id. Either inline as a flat list [x0, y0, x1, y1, ...]
+    # (use floats, e.g. walls: [1.0, 0.6, 1.0, 3.4]) and/or from a TOML file
+    # ([objects.walls] wall_vertices), absolute or relative to the installed
+    # scalar_field_belief share directory, e.g. config/walls/simple_wall_case.toml.
+    # Both sources are combined. Walls on the domain boundary cut nothing.
+    wall_geometry_file: ''
+    wall_endpoint_extension: 0.01   # [m] along each wall beyond both endpoints
+    # Optional free-space seeds [x, y, ...]: if set, grid nodes not connected
+    # to any seed through uncut edges are inactive (excluded and decoupled).
+    # Leave unset to keep every compartment active.
+    # free_space_seeds: [0.5, 0.5]
+
+    # Visualization (point clouds with fields x, y, z, intensity; intensity is
+    # the actual posterior mean / marginal variance).
+    publish_visualization: true
+    visualization_grid_step: 0.1    # [m]
+    z_offset: -0.8                  # [m] height of the flat cloud plane
