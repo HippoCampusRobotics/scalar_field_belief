@@ -1,4 +1,19 @@
 #!/usr/bin/env python3
+# Copyright (C) 2026 Nathalie Bauschmann
+# SPDX-License-Identifier: GPL-3.0-only
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, version 3 of the License.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 """ROS 2 node for the scalar field GP belief.
 
 This node wraps the ROS-independent `ScalarFieldBelief` class and exposes it
@@ -27,12 +42,20 @@ Publications
 
 `belief/variance_cloud`
     PointCloud2 visualization of the posterior variance.
+
+Frames
+------
+Measurements, queries, and (in wall-aware mode) the wall geometry are all
+interpreted in the configured `frame_id`. The node does not use TF; data in a
+different frame is rejected, and the wall geometry file must already be
+expressed in `frame_id`.
 """
 
 from __future__ import annotations
 
 import traceback
 from math import isfinite
+from pathlib import Path
 
 import numpy as np
 import rclpy
@@ -56,6 +79,10 @@ from std_srvs.srv import Trigger
 
 from scalar_field_belief.belief import ScalarFieldBelief
 from scalar_field_belief.config import BeliefConfig
+from scalar_field_belief.geometry import (
+    WallGeometry,
+    load_wall_geometry_from_toml,
+)
 from scalar_field_belief.visualization import (
     make_field_pointcloud2,
     make_grid_positions,
@@ -75,6 +102,11 @@ class ScalarFieldBeliefNode(Node):
     -----
     Most parameters are static and should be changed in the YAML file before
     starting the node. Only selected visualization parameters are dynamic.
+
+    With `model_variant: wall_aware`, the wall geometry is loaded once at
+    startup from `wall_geometry_file`. Relative paths are resolved against the
+    installed `scalar_field_belief` share directory. Walls, measurements, and
+    queries all use `frame_id`; no TF lookups are performed.
     """
 
     DYNAMIC_PARAMETERS = {
@@ -91,7 +123,12 @@ class ScalarFieldBeliefNode(Node):
         super().__init__('scalar_field_belief')
         self._declare_parameters()
         config = self._read_config()
-        self.belief = ScalarFieldBelief(config)
+        wall_geometry = self._load_wall_geometry(config)
+        try:
+            self.belief = ScalarFieldBelief(config, wall_geometry=wall_geometry)
+        except (TypeError, ValueError) as exc:
+            self.get_logger().error(f'Failed to create belief: {exc}')
+            raise
         self.config = config
 
         self._field_color_min = (
@@ -189,6 +226,17 @@ class ScalarFieldBeliefNode(Node):
         self.declare_parameter('refit_every_k', 1, self._static_descriptor())
         self.declare_parameter(
             'optimize_hyperparameters', True, self._static_descriptor()
+        )
+        self.declare_parameter(
+            'model_variant', 'baseline', self._static_descriptor()
+        )
+        self.declare_parameter('wall_beta', 1.0, self._static_descriptor())
+        self.declare_parameter('wall_rho', 0.35, self._static_descriptor())
+        self.declare_parameter(
+            'init_wall_lengthscale', 1.0, self._static_descriptor()
+        )
+        self.declare_parameter(
+            'wall_geometry_file', '', self._static_descriptor()
         )
         self.declare_parameter(
             'publish_visualization', True, self._static_descriptor()
@@ -369,9 +417,65 @@ class ScalarFieldBeliefNode(Node):
             visualization_height_scale=float(
                 self.get_parameter('visualization_height_scale').value
             ),
+            model_variant=self.get_parameter('model_variant').value,
+            wall_beta=float(self.get_parameter('wall_beta').value),
+            wall_rho=float(self.get_parameter('wall_rho').value),
+            init_wall_lengthscale=float(
+                self.get_parameter('init_wall_lengthscale').value
+            ),
         )
         cfg.validate()
         return cfg
+
+    def _load_wall_geometry(self, config: BeliefConfig) -> WallGeometry | None:
+        """Load the wall geometry required by wall-aware mode.
+
+        Returns `None` in baseline mode without reading `wall_geometry_file`.
+        In wall-aware mode, a missing, unreadable, invalid, or wall-free
+        geometry file is a startup error; there is no fallback to baseline.
+
+        Absolute paths are used as given. Relative paths are resolved against
+        the installed share directory of this package.
+        """
+        if config.model_variant != 'wall_aware':
+            return None
+
+        file_param = str(self.get_parameter('wall_geometry_file').value)
+        try:
+            if not file_param.strip():
+                raise ValueError(
+                    "model_variant 'wall_aware' requires a non-empty "
+                    'wall_geometry_file parameter.'
+                )
+            path = Path(file_param)
+            if not path.is_absolute():
+                # Imported here so the numerical core never depends on ament.
+                from ament_index_python.packages import (
+                    get_package_share_directory,
+                )
+
+                share_dir = get_package_share_directory('scalar_field_belief')
+                path = Path(share_dir) / path
+            if not path.is_file():
+                raise FileNotFoundError(f'wall_geometry_file not found: {path}')
+            geometry = load_wall_geometry_from_toml(path)
+            if len(geometry.walls) == 0:
+                raise ValueError(
+                    f'wall_geometry_file {path} does not define any walls.'
+                )
+        except Exception as exc:
+            message = f'Failed to load wall geometry: {exc}'
+            self.get_logger().error(message)
+            raise RuntimeError(message) from exc
+
+        self.get_logger().info(
+            f"Wall-aware GP belief: loaded geometry '{geometry.name}' "
+            f'with {len(geometry.walls)} walls from {path}, '
+            f"interpreted in frame '{config.frame_id}' "
+            f'(wall_beta={config.wall_beta} 1/m, '
+            f'wall_rho={config.wall_rho} m).'
+        )
+        return geometry
 
     def _on_measurement(self, msg: ScalarMeasurement) -> None:
         """Store one incoming scalar measurement and refit if required.
