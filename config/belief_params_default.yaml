@@ -29,6 +29,17 @@
     # refit since the GP is rebuilt against all current measurements
     optimize_hyperparameters: false
 
+    # GP input/kernel variant: baseline (x/y only) or wall_aware (x/y plus one
+    # smooth feature per wall). baseline does not use the wall_* parameters and
+    # needs no geometry file. See config/belief_params_wall_aware.yaml.
+    model_variant: baseline
+    wall_beta: 1.0              # feature sharpness across a wall [1/m]
+    wall_rho: 0.35              # feature decay length away from a wall [m]
+    init_wall_lengthscale: 1.0  # initial wall-feature lengthscale [-]
+    # absolute path, or relative to the installed scalar_field_belief share
+    # directory; walls must be given in frame_id. Only read in wall_aware mode.
+    wall_geometry_file: ''
+
 
     # visualization 
     publish_visualization: true

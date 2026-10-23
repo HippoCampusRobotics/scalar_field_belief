@@ -1,7 +1,25 @@
+# Packaging metadata for using the ROS-independent numerical core as an
+# ordinary Python package (python -m pip install -e .). The ROS build uses
+# ament_cmake (CMakeLists.txt/package.xml) and does not read this section.
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scalar-field-belief"
+version = "0.0.0"
+description = "Exact-GP scalar field belief (optionally wall-aware) based on GPyTorch"
+requires-python = ">=3.11"
+dependencies = ["numpy", "torch", "gpytorch"]
+
+[tool.setuptools]
+packages = ["scalar_field_belief"]
+
 [tool.ruff]
 line-length = 80
 target-version = "py312"
 src = ["scalar_field_belief"]
+extend-exclude = ["scalar_field_belief/gp_experiments.py"]
 
 [tool.ruff.format]
 quote-style = "single"
