@@ -288,7 +288,7 @@ ros2 topic pub -r 50 /uuv00/thrust_setpoint hippo_control_msgs/msg/ActuatorSetpo
 Finally, within the virtual environment, start a full field estimation setup for testing:
 
 ```bash
-ros2 launch scalar_field_sim top_field_sim_stack.launch.py vehicle_name:=uuv00
+ros2 launch scalar_field_belief top_field_sim_stack.launch.py vehicle_name:=uuv00
 ```
 
 
