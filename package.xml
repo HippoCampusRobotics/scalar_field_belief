@@ -5,11 +5,12 @@
   <version>0.0.0</version>
   <description>Simple scalar field belief based on GPytorch</description>
 
-  <author email="nathalie.bauschmann@tuhh.de">Nathalie Bauschmann</author>
   <maintainer email="nathalie.bauschmann@tuhh.de">Nathalie Bauschmann</maintainer>
-  <url type="website">hippocampusrobotics.github.io/docs</url>
 
   <license>GPL-3.0-only</license>
+
+  <url type="website">hippocampusrobotics.github.io/docs</url>
+  <author email="nathalie.bauschmann@tuhh.de">Nathalie Bauschmann</author>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
   <buildtool_depend>ament_cmake_python</buildtool_depend>
@@ -28,15 +29,15 @@
   <depend>eigen</depend>
   <!-- Belief playground (SCALAR_FIELD_BELIEF_BUILD_PLAYGROUND, default OFF): GMRF
        pybind11 module. Its Qt GUI additionally needs PySide6 + pyqtgraph in the
-       Python environment that runs it (pip; see tools/belief_playground/README.md).
-       scalar_field_sim (scenarios) is not listed: it already exec_depends on
-       this package. -->
+       Python environment that runs it (pip; see tools/belief_playground/README.md). -->
   <build_depend>pybind11-dev</build_depend>
   <build_depend>python3-dev</build_depend>
   <exec_depend>python3-yaml</exec_depend>
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>hippo_common</exec_depend>
   <exec_depend>python3-matplotlib</exec_depend>
+  <!-- Scenarios and simulation nodes for top_field_sim_stack.launch.py and the playground. -->
+  <exec_depend>scalar_field_sim</exec_depend>
   
   <!-- The export tag contains other, unspecified, tags -->
   <export>
