@@ -1,3 +1,18 @@
+# Copyright (C) 2026 Nathalie Bauschmann
+# SPDX-License-Identifier: GPL-3.0-only
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, version 3 of the License.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 """Exact-GP belief model for a 2D scalar field.
 
 This module contains the core, ROS-independent belief implementation. The class
@@ -5,12 +20,17 @@ stores scalar measurements in physical coordinates, refits an exact Gaussian
 process according to a configurable policy, and answers posterior queries at
 physical `(x, y)` positions.
 
+In wall-aware mode, the GP inputs are augmented with smooth features of a
+static wall geometry. Walls, measurements, and queries must all use the same
+physical frame and units (meters).
+
 The ROS node is responsible for translating messages and services to this plain
 Python interface.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import gpytorch
@@ -18,12 +38,24 @@ import numpy as np
 import torch
 
 from scalar_field_belief.config import BeliefConfig
+from scalar_field_belief.geometry import WallGeometry
 from scalar_field_belief.models import (
     ExactFieldGP,
     build_covar_module,
+    get_spatial_kernel,
+    get_wall_kernel,
     initialize_model_hyperparameters,
 )
-from scalar_field_belief.transforms import InputNormalizer2d, TargetStandardizer
+from scalar_field_belief.transforms import (
+    InputNormalizer2d,
+    TargetStandardizer,
+    build_gp_inputs,
+)
+from scalar_field_belief.wall_features import WallFeatureMap
+
+# Tolerance for comparing configuration bounds with wall geometry bounds.
+_BOUNDS_REL_TOL = 1e-9
+_BOUNDS_ABS_TOL = 1e-9
 
 
 @dataclass
@@ -44,6 +76,20 @@ class ScalarFieldBelief:
     config
         Configuration for domain bounds, GP hyperparameters, refit behavior, and
         visualization settings.
+    wall_geometry
+        Static wall geometry in the same physical frame as measurements and
+        queries. Required with at least one wall when
+        `config.model_variant == 'wall_aware'`; its bounds must agree with the
+        configuration bounds. Ignored in baseline mode.
+
+    Raises
+    ------
+    ValueError
+        If the configuration is invalid, or in wall-aware mode if the
+        geometry is missing, has no walls, or its bounds differ from the
+        configuration bounds.
+    TypeError
+        In wall-aware mode, if `wall_geometry` is not a `WallGeometry`.
 
     Notes
     -----
@@ -51,12 +97,19 @@ class ScalarFieldBelief:
     API boundary of this class.
 
     Internally, the GP operates on normalized inputs and standardized target
-    values. Query results are transformed back to original measurement units.
+    values. In wall-aware mode, one dimensionless wall feature per wall,
+    computed from the physical coordinates, is appended to the normalized
+    inputs. Query results are transformed back to original measurement units.
 
     The query method returns the latent GP posterior mean and variance.
     """
 
-    def __init__(self, config: BeliefConfig):
+    def __init__(
+        self,
+        config: BeliefConfig,
+        *,
+        wall_geometry: WallGeometry | None = None,
+    ):
         config.validate()
         self.config = config
         self.normalizer = InputNormalizer2d(
@@ -65,13 +118,62 @@ class ScalarFieldBelief:
             y_min=config.y_min,
             y_max=config.y_max,
         )
+
+        # The wall feature map is fixed for the lifetime of the belief. It is
+        # never constructed or evaluated in baseline mode.
+        self.wall_geometry: WallGeometry | None = None
+        self.wall_feature_map: WallFeatureMap | None = None
+        if config.model_variant == 'wall_aware':
+            self._check_wall_geometry(wall_geometry)
+            self.wall_geometry = wall_geometry
+            self.wall_feature_map = WallFeatureMap(
+                geometry=wall_geometry,
+                beta=config.wall_beta,
+                rho=config.wall_rho,
+            )
+
         self.reset()
+
+    @property
+    def wall_feature_dim(self) -> int:
+        """Number of wall features `M` (zero in baseline mode)."""
+        if self.wall_feature_map is None:
+            return 0
+        return self.wall_feature_map.num_walls
+
+    def _check_wall_geometry(self, geometry: WallGeometry | None) -> None:
+        """Validate the wall geometry required by wall-aware mode."""
+        if geometry is None:
+            raise ValueError(
+                "model_variant 'wall_aware' requires a wall_geometry."
+            )
+        if not isinstance(geometry, WallGeometry):
+            raise TypeError('wall_geometry must be a WallGeometry.')
+        if len(geometry.walls) == 0:
+            raise ValueError(
+                f"Wall geometry '{geometry.name}' has no walls; "
+                "model_variant 'wall_aware' requires at least one wall."
+            )
+
+        config_bounds = (*self.config.x_range, *self.config.y_range)
+        geometry_bounds = (*geometry.x_range, *geometry.y_range)
+        if not all(
+            math.isclose(a, b, rel_tol=_BOUNDS_REL_TOL, abs_tol=_BOUNDS_ABS_TOL)
+            for a, b in zip(config_bounds, geometry_bounds, strict=True)
+        ):
+            raise ValueError(
+                f"Wall geometry '{geometry.name}' bounds "
+                f'x={geometry.x_range}, y={geometry.y_range} do not match '
+                f'the configured bounds x={self.config.x_range}, '
+                f'y={self.config.y_range}.'
+            )
 
     def reset(self) -> None:
         """Clear all stored measurements and fitted model state.
 
         After reset, the belief has no fitted model. A query will fail until
-        enough measurements have been added to trigger the first refit.
+        enough measurements have been added to trigger the first refit. The
+        configured wall geometry and wall feature map are kept.
         """
         self.xy_train_phys = np.empty((0, 2), dtype=float)
         self.y_train = np.empty((0,), dtype=float)
@@ -292,6 +394,11 @@ class ScalarFieldBelief:
         standardizer.std**2 - same convention as measurement_noise_variance()),
         and noise_variance (measurement units squared).
 
+        In wall-aware mode, the dictionary additionally contains
+        wall_feature_lengthscale_0, wall_feature_lengthscale_1, ... in wall
+        order. These are dimensionless (the wall features are dimensionless)
+        and are not scaled by the domain extent.
+
         Raises
         ------
         RuntimeError
@@ -302,16 +409,25 @@ class ScalarFieldBelief:
         assert self.model is not None
         assert self.standardizer is not None
 
-        lengthscale_norm = self.model.covar_module.base_kernel.lengthscale.detach()
+        spatial_kernel = get_spatial_kernel(self.model.covar_module)
+        lengthscale_norm = spatial_kernel.lengthscale.detach()
         x_extent = self.normalizer.x_max - self.normalizer.x_min
         y_extent = self.normalizer.y_max - self.normalizer.y_min
         std2 = float(self.standardizer.std**2)
-        return {
+        hyperparameters = {
             'lengthscale_x_m': float(lengthscale_norm[0, 0]) * x_extent,
             'lengthscale_y_m': float(lengthscale_norm[0, 1]) * y_extent,
-            'outputscale': float(self.model.covar_module.outputscale.detach()) * std2,
+            'outputscale': float(self.model.covar_module.outputscale.detach())
+            * std2,
             'noise_variance': self.measurement_noise_variance(),
         }
+
+        wall_kernel = get_wall_kernel(self.model.covar_module)
+        if wall_kernel is not None:
+            wall_lengthscale = wall_kernel.lengthscale.detach().reshape(-1)
+            for index, value in enumerate(wall_lengthscale.tolist()):
+                hyperparameters[f'wall_feature_lengthscale_{index}'] = value
+        return hyperparameters
 
     def _condition_on_data(self) -> None:
         """Update the current model's conditioning set from all stored measurements.
@@ -358,9 +474,11 @@ class ScalarFieldBelief:
         likelihood = gpytorch.likelihoods.GaussianLikelihood().to(
             self.config.device
         )
-        covar_module = build_covar_module(self.config.kernel_type).to(
-            self.config.device
-        )
+        covar_module = build_covar_module(
+            self.config.kernel_type,
+            model_variant=self.config.model_variant,
+            wall_feature_dim=self.wall_feature_dim,
+        ).to(self.config.device)
         model = ExactFieldGP(train_x, train_y, likelihood, covar_module).to(
             self.config.device
         )
@@ -374,6 +492,7 @@ class ScalarFieldBelief:
             ),
             init_outputscale=self.config.init_outputscale,
             init_noise=self.config.init_noise,
+            init_wall_lengthscale=self.config.init_wall_lengthscale,
         )
 
         if self.config.optimize_hyperparameters:
@@ -395,7 +514,7 @@ class ScalarFieldBelief:
         self.likelihood = likelihood
 
     def _build_train_tensors(self) -> tuple[torch.Tensor, torch.Tensor]:
-        """Build normalized training inputs and standardized training targets.
+        """Build GP training inputs and standardized training targets.
 
         This method is used by both `_fit_model` and `_condition_on_data`. It
         also updates `self.standardizer`, because target standardization is
@@ -404,12 +523,7 @@ class ScalarFieldBelief:
         if len(self.y_train) == 0:
             raise RuntimeError('Cannot build tensors without training data.')
 
-        xy_train_norm = self.normalizer.transform(self.xy_train_phys)
-        train_x = torch.as_tensor(
-            xy_train_norm,
-            dtype=self.config.dtype,
-            device=self.config.device,
-        )
+        train_x = self._build_input_tensor(self.xy_train_phys)
         y_train_tensor = torch.as_tensor(
             self.y_train,
             dtype=self.config.dtype,
@@ -421,7 +535,7 @@ class ScalarFieldBelief:
         return train_x, train_y
 
     def _build_query_tensor(self, query_xy_phys: np.ndarray) -> torch.Tensor:
-        """Build normalized query inputs for posterior evaluation.
+        """Build GP query inputs for posterior evaluation.
 
         This method is intentionally read-only with respect to the belief state.
         In particular, it does not rebuild training tensors and does not refit
@@ -435,10 +549,22 @@ class ScalarFieldBelief:
         if not np.all(np.isfinite(query_xy_phys)):
             raise ValueError('query_xy_phys must contain only finite values.')
 
-        query_xy_norm = self.normalizer.transform(query_xy_phys)
-        query_x = torch.as_tensor(
-            query_xy_norm,
+        return self._build_input_tensor(query_xy_phys)
+
+    def _build_input_tensor(self, xy_phys: np.ndarray) -> torch.Tensor:
+        """Convert physical `(N, 2)` positions to the GP model input tensor.
+
+        This is the single input preparation path for training and query
+        inputs. The result has shape `(N, 2)` in baseline mode and
+        `(N, 2 + M)` in wall-aware mode, with the configured dtype and device.
+        """
+        gp_inputs = build_gp_inputs(
+            xy_phys=xy_phys,
+            input_normalizer=self.normalizer,
+            wall_feature_map=self.wall_feature_map,
+        )
+        return torch.as_tensor(
+            gp_inputs.to_model_array(self.config.model_variant),
             dtype=self.config.dtype,
             device=self.config.device,
         )
-        return query_x
