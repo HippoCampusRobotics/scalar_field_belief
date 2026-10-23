@@ -1,3 +1,18 @@
+# Copyright (C) 2026 Nathalie Bauschmann
+# SPDX-License-Identifier: GPL-3.0-only
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, version 3 of the License.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 """Configuration object for the scalar field belief node.
 
 The `BeliefConfig` dataclass collects all parameters that affect the GP belief
@@ -10,7 +25,8 @@ depending on ROS parameter APIs.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+from dataclasses import KW_ONLY, dataclass
 
 import torch
 
@@ -26,7 +42,8 @@ class BeliefConfig:
 
     x_min, x_max, y_min, y_max
         Physical domain bounds used to normalize `(x, y)` positions before they
-        are passed to the GP.
+        are passed to the GP. In wall-aware mode they must agree with the
+        bounds of the wall geometry.
 
     kernel_type
         Spatial GP kernel type. Supported values are `'rbf'`, `'matern32'`, and
@@ -81,6 +98,24 @@ class BeliefConfig:
     dtype
         Torch floating-point dtype used for GP tensors.
 
+    model_variant
+        GP input/kernel variant. `'baseline'` (default) uses only the
+        normalized `(x, y)` inputs. `'wall_aware'` appends one smooth feature
+        per wall segment and multiplies the spatial kernel by an RBF kernel
+        over these features; it requires a wall geometry. This and the
+        following wall settings are keyword-only.
+
+    wall_beta
+        Fixed wall-feature sharpness in 1/m. Only used in wall-aware mode.
+
+    wall_rho
+        Fixed wall-feature decay length in m. Only used in wall-aware mode.
+
+    init_wall_lengthscale
+        Initial ARD lengthscale of every wall feature. The features are
+        dimensionless, so this value is dimensionless as well. Only used in
+        wall-aware mode.
+
     Notes
     -----
     The dataclass is frozen so that the belief object sees a stable
@@ -114,6 +149,14 @@ class BeliefConfig:
     visualization_height_scale: float
     device: str = 'cpu'
     dtype: torch.dtype = torch.float64
+
+    # Fields below are keyword-only so that they never shift positional
+    # arguments of existing callers.
+    _: KW_ONLY
+    model_variant: str = 'baseline'
+    wall_beta: float = 1.0
+    wall_rho: float = 0.35
+    init_wall_lengthscale: float = 1.0
 
     @property
     def x_range(self) -> tuple[float, float]:
@@ -171,3 +214,13 @@ class BeliefConfig:
             )
         if self.visualization_height_scale <= 0.0:
             raise ValueError('visualization_height_scale must be positive.')
+
+        if self.model_variant not in {'baseline', 'wall_aware'}:
+            raise ValueError(
+                f"Unsupported model_variant '{self.model_variant}'. "
+                "Expected 'baseline' or 'wall_aware'."
+            )
+        for name in ('wall_beta', 'wall_rho', 'init_wall_lengthscale'):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0.0:
+                raise ValueError(f'{name} must be positive and finite.')

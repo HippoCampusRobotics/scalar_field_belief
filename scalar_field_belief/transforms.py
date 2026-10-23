@@ -1,3 +1,18 @@
+# Copyright (C) 2026 Nathalie Bauschmann
+# SPDX-License-Identifier: GPL-3.0-only
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, version 3 of the License.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 """Input and target transforms for the scalar field GP belief.
 
 This module contains the small preprocessing helpers used by the belief model.
@@ -15,14 +30,24 @@ There are two separate transformations:
 This distinction is important:
 - input normalization depends on known physical bounds,
 - target standardization depends on observed measurement values.
+
+`build_gp_inputs` is the single preparation path for training and query
+inputs. It combines the normalized coordinates with optional wall features,
+which are always evaluated on the original physical coordinates. The public
+belief API stays `(N, 2)` physical positions; the model array is `(N, 2)` in
+baseline mode and `(N, 2 + M)` in wall-aware mode.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
+
+if TYPE_CHECKING:
+    from scalar_field_belief.wall_features import WallFeatureMap
 
 
 @dataclass
@@ -177,3 +202,137 @@ class InputNormalizer2d:
         xy_norm[:, 0] = (xy[:, 0] - self.x_min) / (self.x_max - self.x_min)
         xy_norm[:, 1] = (xy[:, 1] - self.y_min) / (self.y_max - self.y_min)
         return xy_norm
+
+
+def _check_xy(xy: np.ndarray, name: str) -> None:
+    if xy.ndim != 2 or xy.shape[1] != 2:
+        raise ValueError(
+            f'Expected {name} to have shape (N, 2), got {tuple(xy.shape)}'
+        )
+
+
+@dataclass(frozen=True, eq=False)
+class GPInputs:
+    """Prepared GP inputs for a batch of physical positions.
+
+    Parameters
+    ----------
+    xy_phys
+        Physical positions in meters with shape `(N, 2)`.
+    xy_norm
+        Positions normalized by the fixed domain bounds, shape `(N, 2)`.
+    wall_features
+        Dimensionless wall features evaluated at `xy_phys`, shape `(N, M)`.
+        `M` is zero when no wall feature map is used.
+
+    Raises
+    ------
+    ValueError
+        If any array has the wrong shape or the row counts differ.
+    """
+
+    xy_phys: np.ndarray
+    xy_norm: np.ndarray
+    wall_features: np.ndarray
+
+    def __post_init__(self) -> None:
+        # np.asarray does not copy arrays that are already float64.
+        for name in ('xy_phys', 'xy_norm', 'wall_features'):
+            object.__setattr__(
+                self, name, np.asarray(getattr(self, name), dtype=float)
+            )
+        _check_xy(self.xy_phys, 'xy_phys')
+        _check_xy(self.xy_norm, 'xy_norm')
+        if self.wall_features.ndim != 2:
+            raise ValueError(
+                'Expected wall_features to have shape (N, M), got '
+                f'{tuple(self.wall_features.shape)}'
+            )
+        num_rows = self.xy_phys.shape[0]
+        if (
+            self.xy_norm.shape[0] != num_rows
+            or self.wall_features.shape[0] != num_rows
+        ):
+            raise ValueError(
+                'xy_phys, xy_norm, and wall_features must have the same '
+                'number of rows.'
+            )
+
+    @property
+    def wall_feature_dim(self) -> int:
+        """Number of wall feature columns `M`."""
+        return int(self.wall_features.shape[1])
+
+    def to_model_array(self, model_variant: str) -> np.ndarray:
+        """Return the GP input array for the given model variant.
+
+        Parameters
+        ----------
+        model_variant
+            `'baseline'` returns `xy_norm` with shape `(N, 2)`.
+            `'wall_aware'` returns `[x_norm, y_norm, h_0, ..., h_(M-1)]` with
+            shape `(N, 2 + M)`.
+
+        Raises
+        ------
+        ValueError
+            If `model_variant` is unknown, or if it is `'wall_aware'` and
+            there are no wall feature columns.
+        """
+        if model_variant == 'baseline':
+            return self.xy_norm
+        if model_variant == 'wall_aware':
+            if self.wall_feature_dim <= 0:
+                raise ValueError(
+                    'wall_aware model inputs require at least one wall '
+                    'feature column.'
+                )
+            return np.concatenate([self.xy_norm, self.wall_features], axis=1)
+        raise ValueError(f'Unknown model_variant: {model_variant}')
+
+
+def build_gp_inputs(
+    xy_phys: np.ndarray,
+    input_normalizer: InputNormalizer2d,
+    wall_feature_map: WallFeatureMap | None = None,
+) -> GPInputs:
+    """Prepare GP inputs from physical positions.
+
+    Parameters
+    ----------
+    xy_phys
+        Physical positions in meters with shape `(N, 2)`.
+    input_normalizer
+        Normalizer with the fixed domain bounds.
+    wall_feature_map
+        Optional wall feature map. It is evaluated on the physical positions,
+        not on the normalized ones. If `None`, no features are computed and
+        the feature matrix has shape `(N, 0)`.
+
+    Returns
+    -------
+    GPInputs
+        Physical, normalized, and wall-feature representations.
+
+    Raises
+    ------
+    ValueError
+        If `xy_phys` does not have shape `(N, 2)` or contains non-finite
+        values.
+    """
+    xy_phys = np.asarray(xy_phys, dtype=float)
+    _check_xy(xy_phys, 'xy_phys')
+    if not np.all(np.isfinite(xy_phys)):
+        raise ValueError('xy_phys must contain only finite values.')
+
+    xy_norm = input_normalizer.transform(xy_phys)
+    if wall_feature_map is None:
+        wall_features = np.empty((xy_phys.shape[0], 0), dtype=float)
+    else:
+        wall_features = wall_feature_map.transform_xy_to_wall_features(xy_phys)
+
+    return GPInputs(
+        xy_phys=xy_phys,
+        xy_norm=xy_norm,
+        wall_features=wall_features,
+    )
