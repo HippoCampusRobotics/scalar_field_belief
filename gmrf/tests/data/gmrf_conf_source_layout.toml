@@ -1,0 +1,36 @@
+# Same layout and keys as the source's resources/configs/gmrf_conf.toml.
+[general]
+N_X = 50
+N_Y = 25
+size_x = 15.0
+size_y = 10.0
+
+[energies]
+field_neighbors = true
+flow_neighbors = true
+flow_conservation = true
+obstacle_flow = true
+flow_field = true
+
+[field_params]
+prior_mean = 0.0
+prior_sigma = 100.0
+sigma_zeta = 0.0
+sigma_p = 0.8
+edge_prior_var = 4.0
+sigma_s = 0.15
+sigma_flow = 0.03
+
+[flow_field_params]
+prior_mean_x = 0.0
+prior_mean_y = 0.0
+prior_sigma = 10.0
+sigma_zeta = 0.0
+sigma_p = 0.15
+edge_prior_var = 4.0
+sigma_s = 0.05
+sigma_c = 0.04
+sigma_o = 0.1
+
+[source_loc]
+all_neighbors = true
