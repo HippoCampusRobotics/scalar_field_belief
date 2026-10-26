@@ -70,7 +70,7 @@ def test_wall_aware_gp_uses_scenario_walls(single_wall_path):
     assert gp.belief.config.model_variant == 'wall_aware'
     walls = gp.belief.wall_geometry.walls
     assert [(w.start, w.end) for w in walls] == [((1.0, 0.4), (1.0, 3.6))]
-    assert 'wall_geometry_file' in gp.effective_config()['unused_parameters']
+    assert 'belief_geometry' in gp.effective_config()['unused_parameters']
 
 
 def test_gp_wall_aware_backend_uses_scenario_walls(single_wall_path):
