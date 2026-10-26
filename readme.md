@@ -407,6 +407,13 @@ For visualization only:
 /<vehicle_name>/belief/variance_cloud
 ```
 
+Both are `sensor_msgs/PointCloud2` on the visualization grid, in `frame_id`,
+latched (`transient_local`, depth 1). The mean cloud has the fields `x`, `y`,
+`z`, `rgb` (mean mapped to colour, for RViz) and `intensity` (posterior mean
+value). The variance cloud has `x`, `y`, `z` and `intensity` (posterior
+variance value). `z` is only a display offset (and the height in
+`visualization_z_mode: height`).
+
 ### Example commands
 
 #### Publish one test measurement

@@ -128,6 +128,7 @@ def make_field_pointcloud2(
     colormap_min: float = 0.0,
     colormap_max: float = 0.015,
     cmap_name: str = 'viridis',
+    include_intensity: bool = False,
 ) -> PointCloud2:
     """Build a PointCloud2 message for scalar field visualization.
 
@@ -155,11 +156,16 @@ def make_field_pointcloud2(
         Upper bound of the fixed color range.
     cmap_name
         Name of the matplotlib colormap used for RGB mapping.
+    include_intensity
+        If true, append a FLOAT32 `intensity` field (offset 16) with the
+        scalar values themselves, so that subscribers can read the numbers
+        and not only the colors.
 
     Returns
     -------
     PointCloud2
-        Point cloud with fields `x`, `y`, `z`, and `rgb`.
+        Point cloud with fields `x`, `y`, `z`, and `rgb`, plus `intensity`
+        if `include_intensity` is true.
 
     Raises
     ------
@@ -211,22 +217,29 @@ def make_field_pointcloud2(
     # RViz expects packed RGB colors in a FLOAT32 field. The uint32 color values
     # are therefore reinterpreted as float32 without changing the underlying bit
     # pattern.
-    points = np.column_stack(
-        [
-            positions_xy[:, 0],
-            positions_xy[:, 1],
-            z + z_offset,
-            rgb.view(np.float32),
-        ]
-    ).astype(np.float32, copy=False)
-
+    columns = [
+        positions_xy[:, 0],
+        positions_xy[:, 1],
+        z + z_offset,
+        rgb.view(np.float32),
+    ]
     fields = [
         PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
         PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
         PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
-        # PointField(name="intensity", offset=12, datatype=PointField.FLOAT32, count=1),
         PointField(name='rgb', offset=12, datatype=PointField.FLOAT32, count=1),
     ]
+    if include_intensity:
+        columns.append(values)
+        fields.append(
+            PointField(
+                name='intensity',
+                offset=16,
+                datatype=PointField.FLOAT32,
+                count=1,
+            )
+        )
+    points = np.column_stack(columns).astype(np.float32, copy=False)
 
     header = Header()
     header.stamp = stamp
