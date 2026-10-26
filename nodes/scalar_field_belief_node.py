@@ -38,10 +38,12 @@ Services
 Publications
 ------------
 `belief/mean_cloud`
-    PointCloud2 visualization of the posterior mean.
+    PointCloud2 visualization of the posterior mean: fields `x`, `y`, `z`,
+    `rgb` (colored mean) and `intensity` (posterior mean value).
 
 `belief/variance_cloud`
-    PointCloud2 visualization of the posterior variance.
+    PointCloud2 visualization of the posterior variance: fields `x`, `y`,
+    `z` and `intensity` (posterior variance value).
 
 Frames
 ------
@@ -637,10 +639,11 @@ class ScalarFieldBeliefNode(Node):
 
         The mean cloud uses the configurable field color range. If fixed color
         scaling is disabled, the upper color limit is chosen from the current
-        posterior mean cloud.
+        posterior mean cloud. The mean values themselves are carried in the
+        `intensity` field of the mean cloud.
 
-        The variance cloud currently uses the default color range of
-        `make_field_pointcloud2`.
+        The variance cloud carries the posterior variance as its numeric
+        `intensity` field (`make_intensity_pointcloud2`, no colors).
         """
         if not self.belief.has_model():
             return
@@ -671,6 +674,7 @@ class ScalarFieldBeliefNode(Node):
             colormap_min=self._field_color_min,
             colormap_max=effective_color_max,
             height_scale=self.config.visualization_height_scale,
+            include_intensity=True,
         )
         var_cloud = make_intensity_pointcloud2(
             positions_xy=grid_xy,
