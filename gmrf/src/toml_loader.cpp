@@ -18,6 +18,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <filesystem>
 #include <initializer_list>
 #include <limits>
 #include <stdexcept>
@@ -391,11 +392,49 @@ GmrfConfig parseGmrfConfigToml(std::string_view text,
 }
 
 WallFile loadWallsToml(const std::string& path) {
-  return wallsFromTable(parseFile(path), path);
+  const toml::table root = parseFile(path);
+  const toml::node* ref = root.get("geometry_file");
+  if (!ref) {
+    if (root.get("field_file")) {
+      throw std::invalid_argument(
+          path +
+          " defines 'field_file' but no 'geometry_file'; a scenario in "
+          "reference form needs 'geometry_file' for its geometry.");
+    }
+    return wallsFromTable(root, path);
+  }
+  const auto* ref_str = ref->as_string();
+  if (!ref_str || ref_str->get().empty()) {
+    throw std::invalid_argument(
+        path + ": 'geometry_file' must be a non-empty string.");
+  }
+  std::filesystem::path geometry_path(ref_str->get());
+  if (geometry_path.is_relative()) {
+    geometry_path = std::filesystem::path(path).parent_path() / geometry_path;
+  }
+  const std::string geometry_file = geometry_path.string();
+  if (!std::filesystem::is_regular_file(geometry_path)) {
+    throw std::runtime_error("Geometry file " + geometry_file +
+                             " referenced by " + path + " not found.");
+  }
+  const toml::table geometry_root = parseFile(geometry_file);
+  if (geometry_root.get("geometry_file") || geometry_root.get("field_file")) {
+    throw std::invalid_argument(
+        "Geometry file " + geometry_file + " referenced by " + path +
+        " must not contain 'geometry_file' or 'field_file'.");
+  }
+  return wallsFromTable(geometry_root, geometry_file);
 }
 
 WallFile parseWallsToml(std::string_view text, const std::string& source_name) {
-  return wallsFromTable(parseText(text, source_name), source_name);
+  const toml::table root = parseText(text, source_name);
+  if (root.get("geometry_file") || root.get("field_file")) {
+    throw std::invalid_argument(
+        source_name +
+        ": 'geometry_file'/'field_file' references need a file location; use "
+        "loadWallsToml.");
+  }
+  return wallsFromTable(root, source_name);
 }
 
 }  // namespace scalar_field_belief::gmrf

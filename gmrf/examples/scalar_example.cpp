@@ -36,8 +36,8 @@ int main() {
     cfg.sigma_p_per_m = 0.8;  // neighbour std = 0.8 * 0.05^2 = 0.002 [units]
     cfg.sigma_s = 0.0005;     // measurement noise std [units]
 
-    // A wall at x = 1.0 from y = 0.6 to 3.4 (same as
-    // config/walls/simple_wall_case.toml).
+    // A wall at x = 1.0 from y = 0.6 to 3.4 (first wall of the
+    // scalar_field_sim geometry file geometry/tank_2x4_two_walls.toml).
     gm::GmrfBelief belief(cfg, {gm::WallSegment{1.0, 0.6, 1.0, 3.4}});
 
     belief.addMeasurement(0.8, 2.0, 0.010);

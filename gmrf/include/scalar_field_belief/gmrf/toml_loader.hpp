@@ -65,11 +65,24 @@ GmrfConfig parseGmrfConfigToml(std::string_view text,
                                const std::string& source_name = "<string>");
 
 /// Loads walls from [objects.walls] wall_vertices = [[x0, y0, x1, y1], ...]
-/// (source map format and the GP wall files). Optional: [general] name,
-/// [bounds] x_min/x_max/y_min/y_max, [objects.walls] num_walls (must match).
-/// Other tables are ignored. A file without walls yields an empty list.
-/// Throws std::runtime_error (file/syntax) or std::invalid_argument.
+/// (source map format, scalar_field_sim geometry files and self-contained
+/// scenarios). Optional: [general] name, [bounds] x_min/x_max/y_min/y_max,
+/// [objects.walls] num_walls (must match). Other tables are ignored. A file
+/// without walls yields an empty list.
+///
+/// If the file has a top-level string `geometry_file` (scalar_field_sim
+/// scenario in reference form), name, bounds and walls are read from that
+/// file instead, resolved relative to the directory of `path` (absolute paths
+/// are used as given); all other content of `path` is ignored. Only one level
+/// of reference is followed: a referenced file containing `geometry_file` or
+/// `field_file` throws std::invalid_argument, as does a file with `field_file`
+/// but without `geometry_file`.
+/// Throws std::runtime_error (missing file, unreadable file, syntax) or
+/// std::invalid_argument.
 WallFile loadWallsToml(const std::string& path);
+/// Same as loadWallsToml for TOML text. A `geometry_file` or `field_file` key
+/// throws std::invalid_argument, since there is no file location to resolve
+/// it.
 WallFile parseWallsToml(std::string_view text,
                         const std::string& source_name = "<string>");
 

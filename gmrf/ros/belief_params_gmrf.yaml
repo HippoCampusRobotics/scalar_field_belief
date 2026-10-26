@@ -28,10 +28,14 @@
 
     # Walls in frame_id. Either inline as a flat list [x0, y0, x1, y1, ...]
     # (use floats, e.g. walls: [1.0, 0.6, 1.0, 3.4]) and/or from a TOML file
-    # ([objects.walls] wall_vertices), absolute or relative to the installed
-    # scalar_field_belief share directory, e.g. config/walls/simple_wall_case.toml.
+    # selected by belief_geometry: 'scenario' uses the geometry of
+    # scenario_path (the scenario_path launch argument overrides the value
+    # below); any other value is a geometry or scenario file; '' loads no
+    # file. Paths are absolute or relative to the installed scalar_field_sim
+    # share directory.
     # Both sources are combined. Walls on the domain boundary cut nothing.
-    wall_geometry_file: ''
+    belief_geometry: ''
+    scenario_path: ''
     wall_endpoint_extension: 0.01   # [m] along each wall beyond both endpoints
     # Optional free-space seeds [x, y, ...]: if set, grid nodes not connected
     # to any seed through uncut edges are inactive (excluded and decoupled).

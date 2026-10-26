@@ -16,12 +16,46 @@
 // TOML config / wall loaders (optional target scalar_field_belief::gmrf_toml).
 #include <gtest/gtest.h>
 
+#include <filesystem>
+#include <fstream>
+#include <random>
 #include <stdexcept>
 #include <string>
 
 #include "scalar_field_belief/gmrf/toml_loader.hpp"
 
 namespace gm = scalar_field_belief::gmrf;
+namespace fs = std::filesystem;
+
+namespace {
+
+constexpr const char* kGeometryToml =
+    "[general]\nname = \"tank\"\n"
+    "[bounds]\nx_min = 0.0\nx_max = 2.0\ny_min = 0.0\ny_max = 4.0\n"
+    "[objects.walls]\n"
+    "wall_vertices = [[1.0, 0.6, 1.0, 3.4], [1.0, 2.1, 1.5, 2.1]]\n";
+
+/// Fresh directory below the system temp directory, removed after the test.
+class TomlLoaderFiles : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    dir_ = fs::temp_directory_path() /
+           ("gmrf_test_toml_loader_" + std::to_string(std::random_device{}()));
+    fs::create_directories(dir_);
+  }
+  void TearDown() override { fs::remove_all(dir_); }
+
+  std::string write(const std::string& name, const std::string& text) const {
+    const fs::path path = dir_ / name;
+    fs::create_directories(path.parent_path());
+    std::ofstream(path) << text;
+    return path.string();
+  }
+
+  fs::path dir_;
+};
+
+}  // namespace
 
 TEST(TomlLoader, ReadsSourceConfigLayout) {
   const gm::GmrfConfig c = gm::loadGmrfConfigToml(
@@ -117,4 +151,50 @@ TEST(TomlLoader, WallFileVariantsAndErrors) {
   for (const char* text : bad) {
     EXPECT_THROW(gm::parseWallsToml(text), std::invalid_argument) << text;
   }
+}
+
+TEST_F(TomlLoaderFiles, ReadsGeometryReferencedByScenario) {
+  write("geometry/tank.toml", kGeometryToml);
+  // field_file and [general] of the scenario are ignored.
+  const gm::WallFile f =
+      gm::loadWallsToml(write("scenarios/scenario.toml",
+                              "geometry_file = \"../geometry/tank.toml\"\n"
+                              "field_file = \"missing.toml\"\n"
+                              "[general]\nname = \"scenario\"\n"));
+  EXPECT_EQ(f.name, "tank");
+  ASSERT_TRUE(f.has_bounds);
+  EXPECT_DOUBLE_EQ(f.bounds.x_max, 2.0);
+  EXPECT_DOUBLE_EQ(f.bounds.y_max, 4.0);
+  ASSERT_EQ(f.walls.size(), 2u);
+  EXPECT_DOUBLE_EQ(f.walls[1].x1, 1.5);
+}
+
+TEST_F(TomlLoaderFiles, ReadsAbsoluteGeometryReference) {
+  const std::string geometry = write("tank.toml", kGeometryToml);
+  const gm::WallFile f = gm::loadWallsToml(
+      write("scenario.toml", "geometry_file = \"" + geometry + "\"\n"));
+  EXPECT_EQ(f.walls.size(), 2u);
+}
+
+TEST_F(TomlLoaderFiles, GeometryReferenceErrors) {
+  write("inner.toml", kGeometryToml);
+  write("outer.toml", "geometry_file = \"inner.toml\"\n");
+  EXPECT_THROW(gm::loadWallsToml(
+                   write("nested.toml", "geometry_file = \"outer.toml\"\n")),
+               std::invalid_argument);
+  EXPECT_THROW(gm::loadWallsToml(
+                   write("missing.toml", "geometry_file = \"nothing.toml\"\n")),
+               std::runtime_error);
+  EXPECT_THROW(gm::loadWallsToml(write("number.toml", "geometry_file = 1\n")),
+               std::invalid_argument);
+  EXPECT_THROW(gm::parseWallsToml("geometry_file = \"inner.toml\"\n"),
+               std::invalid_argument);
+}
+
+TEST_F(TomlLoaderFiles, RejectsFieldFileWithoutGeometryFile) {
+  // Would otherwise load the inline walls of kGeometryToml.
+  const std::string text =
+      std::string("field_file = \"field.toml\"\n") + kGeometryToml;
+  EXPECT_THROW(gm::loadWallsToml(write("scenario.toml", text)),
+               std::invalid_argument);
 }

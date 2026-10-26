@@ -69,6 +69,16 @@ rcl_interfaces::msg::ParameterDescriptor staticDescriptor(
   return d;
 }
 
+/// `s` without leading and trailing whitespace.
+std::string trim(const std::string& s) {
+  const char* ws = " \t\n\r\f\v";
+  const std::size_t first = s.find_first_not_of(ws);
+  if (first == std::string::npos) {
+    return "";
+  }
+  return s.substr(first, s.find_last_not_of(ws) - first + 1);
+}
+
 std::invalid_argument paramError(const std::string& name,
                                  const std::string& what) {
   return std::invalid_argument("Invalid parameter '" + name + "': " + what);
@@ -182,11 +192,16 @@ class GmrfBeliefNode : public rclcpp::Node {
         staticDescriptor(
             "Flat wall list [x0, y0, x1, y1, ...] in frame_id [m]."));
     declare_parameter<std::string>(
-        "wall_geometry_file", "",
+        "belief_geometry", "",
         staticDescriptor(
-            "Wall TOML file ([objects.walls] wall_vertices); absolute or "
-            "relative "
-            "to the scalar_field_belief share directory; '' for none."));
+            "'scenario' (walls of scenario_path), a geometry or scenario TOML "
+            "file (absolute or relative to the scalar_field_sim share "
+            "directory), or '' for none."));
+    declare_parameter<std::string>(
+        "scenario_path", "",
+        staticDescriptor(
+            "scalar_field_sim scenario used with belief_geometry 'scenario'; "
+            "absolute or relative to the scalar_field_sim share directory."));
     declare_parameter<std::vector<double>>(
         "free_space_seeds", std::vector<double>{},
         staticDescriptor("Flat seed list [x, y, ...]; if non-empty, grid nodes "
@@ -237,18 +252,30 @@ class GmrfBeliefNode : public rclcpp::Node {
       walls.push_back(
           gm::WallSegment{flat[k], flat[k + 1], flat[k + 2], flat[k + 3]});
     }
-    const std::string file = get_parameter("wall_geometry_file").as_string();
-    if (!file.empty()) {
+    const std::string selection =
+        trim(get_parameter("belief_geometry").as_string());
+    if (!selection.empty()) {
+      // 'scenario': walls of the scalar_field_sim scenario in scenario_path.
+      const bool from_scenario = selection == "scenario";
+      const std::string param =
+          from_scenario ? "scenario_path" : "belief_geometry";
+      const std::string file = from_scenario
+                                   ? get_parameter("scenario_path").as_string()
+                                   : selection;
+      if (file.empty()) {
+        throw paramError("scenario_path",
+                         "must be set when belief_geometry is 'scenario'.");
+      }
+      // Same rule as scalar_field_sim.config.resolve_package_path.
       std::filesystem::path path(file);
       if (path.is_relative()) {
         path =
             std::filesystem::path(ament_index_cpp::get_package_share_directory(
-                "scalar_field_belief")) /
+                "scalar_field_sim")) /
             path;
       }
       if (!std::filesystem::is_regular_file(path)) {
-        throw paramError("wall_geometry_file",
-                         "file not found: " + path.string());
+        throw paramError(param, "file not found: " + path.string());
       }
       const gm::WallFile wf = gm::loadWallsToml(path.string());
       if (wf.has_bounds &&
@@ -261,8 +288,11 @@ class GmrfBeliefNode : public rclcpp::Node {
             path.c_str(), wf.bounds.x_min, wf.bounds.x_max, wf.bounds.y_min,
             wf.bounds.y_max, frame_id_.c_str());
       }
-      RCLCPP_INFO(get_logger(), "Loaded %zu walls from %s.", wf.walls.size(),
-                  path.c_str());
+      RCLCPP_INFO(get_logger(),
+                  "Loaded %zu walls ('%s') from %s, selected by %s.",
+                  wf.walls.size(), wf.name.c_str(), path.c_str(),
+                  from_scenario ? "the scenario (belief_geometry: scenario)"
+                                : "belief_geometry");
       walls.insert(walls.end(), wf.walls.begin(), wf.walls.end());
     }
     const std::vector<double> sflat =
