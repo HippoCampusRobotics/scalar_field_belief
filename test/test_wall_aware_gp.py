@@ -19,7 +19,6 @@ Run from the package root:  python3 -m pytest test/test_wall_aware_gp.py
 """
 
 import dataclasses
-from pathlib import Path
 
 import gpytorch
 import numpy as np
@@ -40,9 +39,6 @@ from scalar_field_belief.models import (
 )
 from scalar_field_belief.transforms import InputNormalizer2d, build_gp_inputs
 from scalar_field_belief.wall_features import WallFeatureMap
-
-PKG_ROOT = Path(__file__).resolve().parents[1]
-WALL_FILE = PKG_ROOT / 'config' / 'walls' / 'simple_wall_case.toml'
 
 # Domain 2 m x 4 m with one vertical wall and one horizontal wall.
 GEOMETRY = WallGeometry(
@@ -104,12 +100,102 @@ def fitted_belief(variant: str, optimize: bool = False) -> ScalarFieldBelief:
 # ---------------------------------------------------------------- geometry
 
 
-def test_load_wall_geometry_file():
-    geometry = load_wall_geometry_from_toml(WALL_FILE)
-    assert geometry.name == 'simple_wall_case'
+GEOMETRY_TOML = """
+[general]
+name = "two_walls"
+
+[bounds]
+x_min = 0.0
+x_max = 2.0
+y_min = 0.0
+y_max = 4.0
+
+[objects.walls]
+wall_vertices = [[1.0, 0.6, 1.0, 3.4], [1.0, 2.1, 1.5, 2.1]]
+"""
+
+SELF_CONTAINED_SCENARIO_TOML = """
+[general]
+name = "inline_scenario"
+
+[bounds]
+x_min = 0.0
+x_max = 1.0
+y_min = 0.0
+y_max = 2.0
+
+[objects.walls]
+wall_vertices = [[0.5, 0.2, 0.5, 1.8]]
+
+[objects.sources]
+source_positions = [[0.2, 1.0]]
+"""
+
+
+def test_load_wall_geometry_file(tmp_path):
+    path = tmp_path / 'geometry.toml'
+    path.write_text(GEOMETRY_TOML)
+    geometry = load_wall_geometry_from_toml(path)
+    assert geometry.name == 'two_walls'
     assert geometry.x_range == (0.0, 2.0)
     assert geometry.y_range == (0.0, 4.0)
     assert len(geometry.walls) == 2
+    assert geometry.walls[1].start == (1.0, 2.1)
+    assert geometry.walls[1].end == (1.5, 2.1)
+
+
+def test_load_scenario_with_geometry_reference(tmp_path):
+    (tmp_path / 'geometry').mkdir()
+    (tmp_path / 'geometry' / 'tank.toml').write_text(GEOMETRY_TOML)
+    scenario = tmp_path / 'scenario.toml'
+    # field_file and [general] of the scenario are ignored.
+    scenario.write_text(
+        'geometry_file = "geometry/tank.toml"\n'
+        'field_file = "does_not_exist.toml"\n'
+        '[general]\nname = "scenario"\n'
+    )
+    geometry = load_wall_geometry_from_toml(scenario)
+    assert geometry.name == 'two_walls'
+    assert geometry.x_range == (0.0, 2.0)
+    assert geometry.y_range == (0.0, 4.0)
+    assert len(geometry.walls) == 2
+
+
+def test_load_self_contained_scenario(tmp_path):
+    path = tmp_path / 'scenario.toml'
+    path.write_text(SELF_CONTAINED_SCENARIO_TOML)
+    geometry = load_wall_geometry_from_toml(path)
+    assert geometry.name == 'inline_scenario'
+    assert geometry.x_range == (0.0, 1.0)
+    assert geometry.y_range == (0.0, 2.0)
+    assert [(w.start, w.end) for w in geometry.walls] == [
+        ((0.5, 0.2), (0.5, 1.8))
+    ]
+
+
+def test_nested_geometry_reference_rejected(tmp_path):
+    (tmp_path / 'inner.toml').write_text(GEOMETRY_TOML)
+    (tmp_path / 'outer.toml').write_text('geometry_file = "inner.toml"\n')
+    scenario = tmp_path / 'scenario.toml'
+    scenario.write_text('geometry_file = "outer.toml"\n')
+    with pytest.raises(ValueError, match='geometry_file'):
+        load_wall_geometry_from_toml(scenario)
+
+
+def test_field_file_without_geometry_file_rejected(tmp_path):
+    scenario = tmp_path / 'scenario.toml'
+    scenario.write_text(
+        'field_file = "field.toml"\n' + SELF_CONTAINED_SCENARIO_TOML
+    )
+    with pytest.raises(ValueError, match='geometry_file'):
+        load_wall_geometry_from_toml(scenario)
+
+
+def test_missing_referenced_geometry_file(tmp_path):
+    scenario = tmp_path / 'scenario.toml'
+    scenario.write_text('geometry_file = "missing.toml"\n')
+    with pytest.raises(FileNotFoundError, match='missing.toml'):
+        load_wall_geometry_from_toml(scenario)
 
 
 @pytest.mark.parametrize(
