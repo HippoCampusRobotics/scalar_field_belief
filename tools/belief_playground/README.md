@@ -108,8 +108,8 @@ directories, the error lists the candidates.
 
 Backend configuration: each adapter reads its own ROS parameter YAML
 (`/**: ros__parameters:`) with PyYAML. The domain bounds are always taken from
-the scenario, and so are the known walls (`wall_geometry_file`/`walls` in the
-YAML are ignored). The wall-aware GP gets the scenario walls as its
+the scenario, and so are the known walls (`belief_geometry`, `scenario_path`,
+and `walls` in the YAML are ignored). The wall-aware GP gets the scenario walls as its
 `WallGeometry`. The GMRF keeps `nx`/`ny` from its YAML, so `dx`/`dy` follow the
 scenario bounds. All overrides are recorded in the configuration snapshot
 saved with each session. If a required parameter is missing, that backend is
@@ -214,7 +214,7 @@ received. Undo and load replay the stored values without drawing new noise.
 `session_*.json` records:
 
 * the scenario path, the sha256 and full text of the scenario file and its
-  `field_file`;
+  referenced `geometry_file` and `field_file`;
 * the domain, walls and units;
 * the noise settings (`seed_in_use`, `pending_seed`, draws);
 * the display grid;

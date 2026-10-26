@@ -100,14 +100,20 @@ class Scenario:
         # bytes, not whatever is on disk at save/load time.
         self._file_bytes = self.path.read_bytes()
         self.config, self._field = load_field_from_toml(self.path)
+        self._geometry_file_bytes = (
+            Path(self.config.geometry_file).read_bytes()
+            if self.config.geometry_file is not None
+            else None
+        )
         self._field_file_bytes = (
             Path(self.config.field_file).read_bytes()
             if self.config.field_file is not None
             else None
         )
         h = hashlib.sha256(self._file_bytes)
-        if self._field_file_bytes is not None:
-            h.update(self._field_file_bytes)
+        for referenced in (self._geometry_file_bytes, self._field_file_bytes):
+            if referenced is not None:
+                h.update(referenced)
         self._content_hash = h.hexdigest()
         geom = self.config.geometry
         walls = tuple(
@@ -134,8 +140,8 @@ class Scenario:
         return self._field.evaluate(np.asarray(xy, dtype=float))
 
     def content_hash(self) -> str:
-        """sha256 over the scenario file and its referenced field file, as
-        read when the scenario was loaded."""
+        """sha256 over the scenario file and its referenced geometry and
+        field files, as read when the scenario was loaded."""
         return self._content_hash
 
     def record(self) -> dict:
@@ -146,6 +152,7 @@ class Scenario:
             'content_sha256': self.content_hash(),
             'file_sha256': hashlib.sha256(self._file_bytes).hexdigest(),
             'file_text': self._file_bytes.decode(),
+            'geometry_file': None,
             'field_file': None,
             'x_range': list(self.domain.x_range),
             'y_range': list(self.domain.y_range),
@@ -160,6 +167,12 @@ class Scenario:
                 self.config.visualization_grid_step
             ),
         }
+        if self.config.geometry_file is not None:
+            rec['geometry_file'] = {
+                'path': str(self.config.geometry_file),
+                'sha256': hashlib.sha256(self._geometry_file_bytes).hexdigest(),
+                'text': self._geometry_file_bytes.decode(),
+            }
         if self.config.field_file is not None:
             rec['field_file'] = {
                 'path': str(self.config.field_file),

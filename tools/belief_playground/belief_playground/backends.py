@@ -132,7 +132,8 @@ def _json_value(value):
 
 # Parameters in the GP YAML that the playground does not use.
 _GP_UNUSED_KEYS = {
-    'wall_geometry_file': 'replaced by the scenario walls',
+    'belief_geometry': 'replaced by the scenario walls',
+    'scenario_path': 'replaced by the scenario walls',
     'field_color_min': 'ROS visualization only',
     'field_color_max': 'ROS visualization only',
     'use_fixed_field_color_max': 'ROS visualization only',
@@ -279,7 +280,8 @@ _GMRF_KEYS = (
 _GMRF_UNUSED_KEYS = {
     'frame_id': 'not used (single frame)',
     'walls': 'replaced by the scenario walls',
-    'wall_geometry_file': 'replaced by the scenario walls',
+    'belief_geometry': 'replaced by the scenario walls',
+    'scenario_path': 'replaced by the scenario walls',
     'publish_visualization': 'ROS visualization only',
     'visualization_grid_step': 'ROS visualization only',
     'z_offset': 'ROS visualization only',
