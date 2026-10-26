@@ -16,7 +16,7 @@
 """Static wall geometry for the wall-aware scalar field belief.
 
 This module defines small immutable containers for straight wall segments and
-a loader for wall-only TOML geometry files. It contains no GP logic and no ROS
+a loader for TOML geometry files. It contains no GP logic and no ROS
 dependencies.
 
 All coordinates are physical coordinates in meters and must refer to the same
@@ -25,10 +25,13 @@ frame as the measurements and queries of the belief (the configured
 
 TOML schema
 -----------
+A geometry file (or a self-contained scalar_field_sim scenario) defines the
+geometry inline:
+
 .. code-block:: toml
 
     [general]
-    name = "simple_wall_case"        # optional, defaults to the file stem
+    name = "tank_2x4_two_walls"      # optional, defaults to the file stem
 
     [bounds]
     x_min = 0.0
@@ -42,6 +45,18 @@ TOML schema
     ]
 
 Other sections (for example source descriptions) are ignored.
+
+A scalar_field_sim scenario in reference form instead contains a top-level
+`geometry_file` key; the geometry is then read from that file:
+
+.. code-block:: toml
+
+    geometry_file = "../geometry/tank_2x4_two_walls.toml"
+    field_file = "../fields/test_four_sources.toml"   # ignored here
+
+The reference is resolved relative to the directory of the referencing file
+(absolute paths are used as given) and must not lead to another reference. A
+file with `field_file` but without `geometry_file` is rejected.
 """
 
 from __future__ import annotations
@@ -186,33 +201,77 @@ def _get_table(parent: dict, key: str, path: Path) -> dict:
 
 
 def load_wall_geometry_from_toml(path: str | os.PathLike) -> WallGeometry:
-    """Load wall-only geometry from a TOML file.
+    """Load the wall geometry of a geometry or scenario TOML file.
 
     Parameters
     ----------
     path
-        Path to the TOML file. It is used as given; relative paths are
-        interpreted relative to the current working directory.
+        Path to a geometry file, a self-contained scenario, or a scenario
+        with a top-level `geometry_file` reference. It is used as given;
+        relative paths are interpreted relative to the current working
+        directory.
 
     Returns
     -------
     WallGeometry
         Geometry with walls in file order. If `[objects.walls]` or
-        `wall_vertices` is absent, the geometry has no walls.
+        `wall_vertices` is absent, the geometry has no walls. With a
+        `geometry_file` reference, name, bounds, and walls come from the
+        referenced file; all other content of `path` is ignored.
 
     Raises
     ------
     OSError
         If the file cannot be opened.
+    FileNotFoundError
+        If a referenced geometry file does not exist.
     tomllib.TOMLDecodeError
-        If the file is not valid TOML.
+        If a file is not valid TOML.
     ValueError
-        If required bounds are missing or any value is invalid.
+        If required bounds are missing, any value is invalid, `path` defines
+        `field_file` without `geometry_file`, or a referenced geometry file
+        contains `geometry_file` or `field_file`.
     """
     path = Path(path)
     with path.open('rb') as file:
         data = tomllib.load(file)
 
+    if 'geometry_file' in data:
+        scenario_path = path
+        path = _referenced_geometry_path(path, data['geometry_file'])
+        with path.open('rb') as file:
+            data = tomllib.load(file)
+        nested = sorted({'geometry_file', 'field_file'} & set(data))
+        if nested:
+            raise ValueError(
+                f'Geometry file {path} referenced by {scenario_path} must '
+                f'not contain {nested}.'
+            )
+    elif 'field_file' in data:
+        raise ValueError(
+            f'{path} defines field_file but no geometry_file; a scenario in '
+            'reference form needs geometry_file for its geometry.'
+        )
+
+    return _geometry_from_data(data, path)
+
+
+def _referenced_geometry_path(path: Path, ref) -> Path:
+    """Resolve a `geometry_file` reference of `path` to an existing file."""
+    if not isinstance(ref, str) or not ref:
+        raise ValueError(f'{path}: geometry_file must be a non-empty string.')
+    resolved = Path(ref)
+    if not resolved.is_absolute():
+        resolved = path.parent / resolved
+    if not resolved.is_file():
+        raise FileNotFoundError(
+            f'Geometry file {resolved} referenced by {path} not found.'
+        )
+    return resolved
+
+
+def _geometry_from_data(data: dict, path: Path) -> WallGeometry:
+    """Build a `WallGeometry` from parsed TOML `data` read from `path`."""
     general = _get_table(data, 'general', path)
     name = general.get('name', path.stem)
     if not isinstance(name, str):
