@@ -20,6 +20,9 @@ Arguments:
   namespace      node namespace (default: ''); use different namespaces or
                  remappings to run the GP and GMRF beliefs side by side.
   use_sim_time   'true' / 'false' (default: 'false')
+  scenario_path  scalar_field_sim scenario whose walls are used with
+                 belief_geometry: scenario (default: ''); overrides
+                 scenario_path in belief_params
 """
 
 import os
@@ -54,6 +57,14 @@ def generate_launch_description():
                 default_value='false',
                 description='Use simulation time.',
             ),
+            DeclareLaunchArgument(
+                'scenario_path',
+                default_value='',
+                description='scalar_field_sim scenario whose geometry is '
+                'used with belief_geometry: scenario; absolute or relative to '
+                'the installed scalar_field_sim share directory. Overrides '
+                'scenario_path in belief_params.',
+            ),
             Node(
                 package='scalar_field_belief',
                 executable='gmrf_belief_node',
@@ -61,7 +72,10 @@ def generate_launch_description():
                 namespace=LaunchConfiguration('namespace'),
                 parameters=[
                     LaunchConfiguration('belief_params'),
-                    {'use_sim_time': LaunchConfiguration('use_sim_time')},
+                    {
+                        'use_sim_time': LaunchConfiguration('use_sim_time'),
+                        'scenario_path': LaunchConfiguration('scenario_path'),
+                    },
                 ],
                 output='screen',
                 emulate_tty=True,

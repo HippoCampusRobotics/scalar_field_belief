@@ -78,8 +78,17 @@ dependencies. If no
 
 Launch arguments: `belief_params` (default: installed
 `config/belief_params_gmrf.yaml`), `namespace` (default `''`), `use_sim_time`
-(default `false`). The launch file starts only the GMRF node (node name
-`gmrf_belief`).
+(default `false`), `scenario_path` (default `''`, passed to the node parameter
+of the same name and overriding a value in `belief_params`). The launch file
+starts only the GMRF node (node name `gmrf_belief`).
+
+To use the walls of a `scalar_field_sim` scenario, set `belief_geometry:
+scenario` in the parameter file and pass the scenario, e.g.
+`scenario_path:=scenarios/tests/fields/01_single_wall.toml`. Relative paths in
+`scenario_path` and `belief_geometry` are resolved against the installed
+`scalar_field_sim` share directory, as in the simulator nodes. The walls and
+bounds then come from the geometry file referenced by the scenario (or from the
+scenario itself if it is self-contained).
 
 Side-by-side comparison with the GP backend: both use the same relative names
 (`ir_measurement`, `query_scalar_field_belief`, ...), so never run them in the
@@ -132,7 +141,8 @@ All `sigma_*` values are standard deviations; variances are their squares.
 | `sigma_p_per_m` | 0.8 | neighbour std = `sigma_p_per_m * dx^2` [units/m^2] |
 | `sigma_s` | 0.0005 | measurement noise std [units] |
 | `walls` | unset | flat `[x0, y0, x1, y1, ...]` [m]; use floats |
-| `wall_geometry_file` | `''` | TOML wall file, absolute or relative to the package share dir (e.g. `config/walls/simple_wall_case.toml`); combined with `walls` |
+| `belief_geometry` | `''` | `scenario` (geometry of `scenario_path`), or a geometry or scenario TOML file, absolute or relative to the `scalar_field_sim` share dir; `''` loads no file; combined with `walls` |
+| `scenario_path` | `''` | `scalar_field_sim` scenario used with `belief_geometry: scenario`, absolute or relative to the `scalar_field_sim` share dir; the `scenario_path` launch argument (default `''`) always overrides a value in the parameter file |
 | `wall_endpoint_extension` | 0.01 | [m] |
 | `free_space_seeds` | unset | flat `[x, y, ...]`, see walls |
 | `publish_visualization` | true | |
@@ -176,8 +186,14 @@ plus optional `x_min, y_min, x_max, y_max, wall_endpoint_extension`;
 `[field_params]` with `sigma_p` = `sigma_p_per_m`; `[flow_field_params]`;
 `[energies]`; `[solver]`). Missing keys keep the `GmrfConfig` defaults; wrong
 types, unknown keys/tables, and syntax errors throw. `loadWallsToml(path)` reads
-`[objects.walls] wall_vertices = [[x0, y0, x1, y1], ...]` (the source map format
-and the GP wall files), optional `[bounds]`, `[general] name`, `num_walls`.
+`[objects.walls] wall_vertices = [[x0, y0, x1, y1], ...]` (the source map format,
+`scalar_field_sim` geometry files and self-contained scenarios), optional
+`[bounds]`, `[general] name`, `num_walls`. If the file has a top-level
+`geometry_file` (`scalar_field_sim` scenario in reference form), these are read
+from the referenced file, resolved relative to the scenario's directory; one
+level only (a nested reference throws `std::invalid_argument`, a missing file
+`std::runtime_error`). `parseWallsToml(text)` rejects `geometry_file` with
+`std::invalid_argument`.
 
 Errors: `std::invalid_argument` for invalid configuration, walls, positions,
 values, times; `std::logic_error` for queries with pending data or flow

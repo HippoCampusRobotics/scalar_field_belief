@@ -1,5 +1,5 @@
-# Same format as config/walls/simple_wall_case.toml (GP wall files) and the
-# source's map files ([objects.walls]).
+# Same format as the scalar_field_sim geometry files (e.g.
+# geometry/tank_2x4_two_walls.toml) and the source's map files ([objects.walls]).
 [general]
 name = "simple_wall_case"
 
