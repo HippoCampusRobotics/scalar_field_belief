@@ -27,7 +27,7 @@
   <depend>rclcpp</depend>
   <depend>ament_index_cpp</depend>
   <depend>eigen</depend>
-  <!-- Belief playground (SCALAR_FIELD_BELIEF_BUILD_PLAYGROUND, default OFF): GMRF
+  <!-- Belief playground (SCALAR_FIELD_BELIEF_BUILD_PLAYGROUND, default ON): GMRF
        pybind11 module. Its Qt GUI additionally needs PySide6 + pyqtgraph in the
        Python environment that runs it (pip; see tools/belief_playground/README.md). -->
   <build_depend>pybind11-dev</build_depend>
@@ -36,6 +36,8 @@
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>hippo_common</exec_depend>
   <exec_depend>python3-matplotlib</exec_depend>
+  <!-- belief_live_viewer (installed with the playground): odometry poses. -->
+  <exec_depend>nav_msgs</exec_depend>
   <!-- Scenarios and simulation nodes for top_field_sim_stack.launch.py and the playground. -->
   <exec_depend>scalar_field_sim</exec_depend>
   

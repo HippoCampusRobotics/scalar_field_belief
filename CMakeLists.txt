@@ -33,16 +33,21 @@ find_package(scalar_field_interfaces REQUIRED)
 # Install Python modules
 ament_python_install_package(${PROJECT_NAME})
 
-# Belief playground (tools/belief_playground, Qt GUI, no ROS node) and the
-# GMRF Python module it uses (gmrf/python, needs pybind11-dev + python3-dev).
-#   colcon build --cmake-args -DSCALAR_FIELD_BELIEF_BUILD_PLAYGROUND=ON
+# Belief playground (tools/belief_playground, Qt GUI, no ROS node), the GMRF
+# Python module it uses (gmrf/python, needs pybind11-dev + python3-dev) and the
+# live belief viewer (same Qt package plus an rclpy subscriber node).
+# ON by default; set it OFF on the robot or any machine without the GUI tools:
+#   colcon build --cmake-args -DSCALAR_FIELD_BELIEF_BUILD_PLAYGROUND=OFF
 #   ros2 run scalar_field_belief belief_playground
+#   ros2 run scalar_field_belief belief_live_viewer --scenario <name>
 option(SCALAR_FIELD_BELIEF_BUILD_PLAYGROUND
-  "Build/install the belief playground and the GMRF Python module" OFF)
+  "Build/install the belief playground and the GMRF Python module" ON)
 if(SCALAR_FIELD_BELIEF_BUILD_PLAYGROUND)
   ament_python_install_package(belief_playground
     PACKAGE_DIR tools/belief_playground/belief_playground)
-  install(PROGRAMS tools/belief_playground/scripts/belief_playground
+  install(PROGRAMS
+    tools/belief_playground/scripts/belief_playground
+    tools/belief_playground/scripts/belief_live_viewer
     DESTINATION lib/${PROJECT_NAME})
   # Same interpreter as ament_cmake_python (ABI of the installed module),
   # installed next to the other Python packages of this package.
