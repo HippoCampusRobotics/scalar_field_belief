@@ -35,9 +35,9 @@
     wall_beta: 1.0              # feature sharpness across a wall [1/m]
     wall_rho: 0.35              # feature decay length away from a wall [m]
     init_wall_lengthscale: 1.0  # initial wall-feature lengthscale [-]
-    # absolute path, or relative to the installed scalar_field_belief share
-    # directory; walls must be given in frame_id.
-    wall_geometry_file: config/walls/simple_wall_case.toml
+    # use the walls of the geometry referenced by scenario_path (set by the
+    # launch file); walls must be given in frame_id.
+    belief_geometry: scenario
 
 
     # visualization 

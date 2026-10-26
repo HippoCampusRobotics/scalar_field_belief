@@ -41,6 +41,10 @@ def declare_launch_args(launch_description: LaunchDescription):
     action = DeclareLaunchArgument(
         'scenario_path',
         default_value=scenario_path,
+        description='Scenario of the simulator and of the belief '
+        '(belief_geometry: scenario); absolute or relative to the installed '
+        'scalar_field_sim share directory. Overrides scenario_path in '
+        'belief_params.',
     )
     launch_description.add_action(action)
 
@@ -114,6 +118,7 @@ def create_scalar_field_belief_node():
             LaunchConfiguration('belief_params'),
             {
                 'use_sim_time': LaunchConfiguration('use_sim_time'),
+                'scenario_path': LaunchConfiguration('scenario_path'),
             },
         ],
         output='screen',

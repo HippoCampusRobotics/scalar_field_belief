@@ -31,6 +31,16 @@ def declare_launch_args(launch_description: LaunchDescription):
     )
     launch_description.add_action(action)
 
+    action = DeclareLaunchArgument(
+        'scenario_path',
+        default_value='',
+        description='scalar_field_sim scenario whose geometry is used with '
+        'belief_geometry: scenario; absolute or relative to the installed '
+        'scalar_field_sim share directory. Overrides scenario_path in '
+        'belief_params.',
+    )
+    launch_description.add_action(action)
+
     launch_helper.declare_vehicle_name_and_sim_time(
         launch_description=launch_description,
         use_sim_time_default='true',
@@ -47,6 +57,7 @@ def create_scalar_field_belief_node():
             LaunchConfiguration('belief_params'),
             {
                 'use_sim_time': LaunchConfiguration('use_sim_time'),
+                'scenario_path': LaunchConfiguration('scenario_path'),
             },
         ],
         output='screen',
