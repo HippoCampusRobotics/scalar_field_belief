@@ -47,15 +47,14 @@ Frames
 ------
 Measurements, queries, and (in wall-aware mode) the wall geometry are all
 interpreted in the configured `frame_id`. The node does not use TF; data in a
-different frame is rejected, and the wall geometry file must already be
-expressed in `frame_id`.
+different frame is rejected, and the wall geometry must already be expressed
+in `frame_id`.
 """
 
 from __future__ import annotations
 
 import traceback
 from math import isfinite
-from pathlib import Path
 
 import numpy as np
 import rclpy
@@ -74,6 +73,7 @@ from scalar_field_interfaces.srv import (
     QueryScalarFieldBelief,
     QueryScalarFieldBeliefCovariance,
 )
+from scalar_field_sim.config import resolve_package_path
 from sensor_msgs.msg import PointCloud2
 from std_srvs.srv import Trigger
 
@@ -104,9 +104,10 @@ class ScalarFieldBeliefNode(Node):
     starting the node. Only selected visualization parameters are dynamic.
 
     With `model_variant: wall_aware`, the wall geometry is loaded once at
-    startup from `wall_geometry_file`. Relative paths are resolved against the
-    installed `scalar_field_belief` share directory. Walls, measurements, and
-    queries all use `frame_id`; no TF lookups are performed.
+    startup as selected by `belief_geometry`: `scenario` uses the geometry of
+    the scalar_field_sim scenario `scenario_path`; any other value is a
+    geometry or scenario file. Walls, measurements, and queries all use
+    `frame_id`; no TF lookups are performed.
     """
 
     DYNAMIC_PARAMETERS = {
@@ -235,9 +236,8 @@ class ScalarFieldBeliefNode(Node):
         self.declare_parameter(
             'init_wall_lengthscale', 1.0, self._static_descriptor()
         )
-        self.declare_parameter(
-            'wall_geometry_file', '', self._static_descriptor()
-        )
+        self.declare_parameter('belief_geometry', '', self._static_descriptor())
+        self.declare_parameter('scenario_path', '', self._static_descriptor())
         self.declare_parameter(
             'publish_visualization', True, self._static_descriptor()
         )
@@ -430,48 +430,68 @@ class ScalarFieldBeliefNode(Node):
     def _load_wall_geometry(self, config: BeliefConfig) -> WallGeometry | None:
         """Load the wall geometry required by wall-aware mode.
 
-        Returns `None` in baseline mode without reading `wall_geometry_file`.
-        In wall-aware mode, a missing, unreadable, invalid, or wall-free
-        geometry file is a startup error; there is no fallback to baseline.
+        Returns `None` in baseline mode without reading `belief_geometry` or
+        `scenario_path`. In wall-aware mode, `belief_geometry` selects the
+        file:
 
-        Absolute paths are used as given. Relative paths are resolved against
-        the installed share directory of this package.
+        - `scenario`: the scalar_field_sim scenario `scenario_path`.
+        - any other non-empty value: a geometry or scenario file.
+
+        Both paths follow the rule of the scalar_field_sim nodes
+        (`resolve_package_path`): absolute paths are used as given, relative
+        paths are resolved against the installed scalar_field_sim share
+        directory.
+
+        A scenario file with a `geometry_file` reference provides the walls
+        and bounds of the referenced geometry file. An empty selection or a
+        missing, unreadable, invalid, or wall-free geometry is a startup
+        error; there is no fallback to baseline.
         """
         if config.model_variant != 'wall_aware':
             return None
 
-        file_param = str(self.get_parameter('wall_geometry_file').value)
+        selection = str(self.get_parameter('belief_geometry').value).strip()
+        from_scenario = selection == 'scenario'
         try:
-            if not file_param.strip():
+            if not selection:
                 raise ValueError(
                     "model_variant 'wall_aware' requires a non-empty "
-                    'wall_geometry_file parameter.'
+                    "belief_geometry parameter ('scenario' or a geometry "
+                    'or scenario file path).'
                 )
-            path = Path(file_param)
-            if not path.is_absolute():
-                # Imported here so the numerical core never depends on ament.
-                from ament_index_python.packages import (
-                    get_package_share_directory,
-                )
-
-                share_dir = get_package_share_directory('scalar_field_belief')
-                path = Path(share_dir) / path
+            if from_scenario:
+                scenario = str(self.get_parameter('scenario_path').value)
+                if not scenario.strip():
+                    raise ValueError(
+                        "belief_geometry 'scenario' requires a non-empty "
+                        'scenario_path parameter.'
+                    )
+                path = resolve_package_path(scenario)
+                param_name = 'scenario_path'
+            else:
+                path = resolve_package_path(selection)
+                param_name = 'belief_geometry'
             if not path.is_file():
-                raise FileNotFoundError(f'wall_geometry_file not found: {path}')
+                raise FileNotFoundError(f'{param_name} not found: {path}')
             geometry = load_wall_geometry_from_toml(path)
             if len(geometry.walls) == 0:
                 raise ValueError(
-                    f'wall_geometry_file {path} does not define any walls.'
+                    f'{param_name} {path} does not define any walls.'
                 )
         except Exception as exc:
             message = f'Failed to load wall geometry: {exc}'
             self.get_logger().error(message)
             raise RuntimeError(message) from exc
 
+        origin = (
+            'the scenario (belief_geometry: scenario)'
+            if from_scenario
+            else 'belief_geometry'
+        )
         self.get_logger().info(
             f"Wall-aware GP belief: loaded geometry '{geometry.name}' "
-            f'with {len(geometry.walls)} walls from {path}, '
-            f"interpreted in frame '{config.frame_id}' "
+            f'with {len(geometry.walls)} walls from {path}, selected by '
+            f"{origin}, interpreted in frame '{config.frame_id}' "
             f'(wall_beta={config.wall_beta} 1/m, '
             f'wall_rho={config.wall_rho} m).'
         )

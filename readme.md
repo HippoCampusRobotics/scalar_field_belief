@@ -156,13 +156,13 @@ print(belief.fitted_hyperparameters_physical())
 
 For the baseline GP, omit `model_variant` (default `'baseline'`) and the geometry: `ScalarFieldBelief(config)`.
 
-To load the geometry from a wall-only TOML file instead (path used as given, relative to the current working directory):
+To load the geometry from a TOML file instead (a geometry file or a `scalar_field_sim` scenario, see [Geometry files](#geometry-files); the path is used as given, relative to the current working directory):
 
 ```python
 from scalar_field_belief.geometry import load_wall_geometry_from_toml
 
 geometry = load_wall_geometry_from_toml(
-    '/home/<user>/ros2/src/scalar_field_belief/config/walls/simple_wall_case.toml'
+    'src/scalar_field_sim/geometry/tank_2x4_two_walls.toml'
 )
 belief = ScalarFieldBelief(config, wall_geometry=geometry)
 ```
@@ -170,7 +170,7 @@ belief = ScalarFieldBelief(config, wall_geometry=geometry)
 
 ## Running the node
 
-After pulling changes that add Python modules or config files (e.g. the wall-aware mode with `config/walls/`), rebuild the package with `colcon build --packages-select scalar_field_belief`, since an existing (symlink) install does not contain the new modules or files.
+After pulling changes that add Python modules or config files, rebuild the package with `colcon build --packages-select scalar_field_belief`, since an existing (symlink) install does not contain the new modules or files.
 
 Activate the virtual environment:
 
@@ -209,7 +209,7 @@ The GP inputs become `[x_norm, y_norm, h_0(x), ..., h_(M-1)(x)]` and the kernel 
 `model_variant` selects the mode:
 
 - `baseline` (default): the unchanged GP over normalized `x/y`. No geometry is needed and the `wall_*` parameters are not used (they must still be valid positive numbers).
-- `wall_aware`: requires a wall geometry with at least one wall whose bounds match `x_min/x_max/y_min/y_max`. The node refuses to start if the geometry file is missing, invalid, or contains no walls; there is no fallback to baseline.
+- `wall_aware`: requires a wall geometry with at least one wall whose bounds match `x_min/x_max/y_min/y_max`, selected with `belief_geometry`. The node refuses to start if `belief_geometry` is empty, if `belief_geometry: scenario` is set without `scenario_path`, or if the geometry is missing, invalid, or contains no walls; there is no fallback to baseline.
 
 ### Parameters
 
@@ -219,7 +219,8 @@ The GP inputs become `[x_norm, y_norm, h_0(x), ..., h_(M-1)(x)]` and the kernel 
 | `wall_beta` | `1.0` | 1/m | Fixed sharpness of the sign change across the wall line |
 | `wall_rho` | `0.35` | m | Fixed decay length of the feature away from the segment |
 | `init_wall_lengthscale` | `1.0` | dimensionless | Initial lengthscale of every wall feature |
-| `wall_geometry_file` | `''` | - | Node only: wall geometry TOML (only read in `wall_aware` mode) |
+| `belief_geometry` | `''` | - | Node only: `scenario`, or a geometry or scenario TOML file, absolute or relative to the installed `scalar_field_sim` share directory (only read in `wall_aware` mode) |
+| `scenario_path` | `''` | - | Node only: `scalar_field_sim` scenario used with `belief_geometry: scenario`, absolute or relative to the installed `scalar_field_sim` share directory. The launch files always pass their `scenario_path` argument (default `''` in `test_belief.launch.py`), which overrides a value in the parameter YAML |
 
 `wall_beta` and `wall_rho` are fixed; they are not learned. Like the spatial lengthscales, the wall lengthscales are optimized only if `optimize_hyperparameters: true`; otherwise they stay at `init_wall_lengthscale`. Use float literals (e.g. `1.0`, not `1`) for these parameters in YAML files.
 
@@ -227,11 +228,11 @@ The GP inputs become `[x_norm, y_norm, h_0(x), ..., h_(M-1)(x)]` and the kernel 
 
 ### Geometry files
 
-Wall-only TOML schema (source sections, if present, are ignored):
+The belief chooses its geometry independently of the simulated field. The geometry TOML schema is the one of the `scalar_field_sim` geometry files (`geometry/*.toml` in that package); other sections, such as sources, are ignored:
 
 ```toml
 [general]
-name = "simple_wall_case"   # optional, defaults to the file name stem
+name = "tank_2x4_two_walls"   # optional, defaults to the file name stem
 
 [bounds]
 x_min = 0.0
@@ -243,12 +244,19 @@ y_max = 4.0
 wall_vertices = [[1.0, 0.6, 1.0, 3.4], [1.0, 2.1, 1.5, 2.1]]  # [x1, y1, x2, y2]
 ```
 
-Path rules for `wall_geometry_file` in the node:
+`load_wall_geometry_from_toml(path)` accepts:
 
-- absolute paths are used as given,
-- relative paths are resolved against the installed package share directory (`$(ros2 pkg prefix --share scalar_field_belief)`), e.g. `config/walls/simple_wall_case.toml`. Files under `config/` are installed by `colcon build`; rebuild after adding or changing them.
+- a geometry file as above, or a self-contained `scalar_field_sim` scenario (bounds and walls inline),
+- a `scalar_field_sim` scenario with a top-level `geometry_file` reference: bounds, walls, and name are then read from the referenced file, resolved relative to the scenario's directory (absolute paths are used as given). The referenced file must not contain `geometry_file` itself (`ValueError`); a missing referenced file raises `FileNotFoundError`. All other content of the scenario (`field_file`, `[general]`, ...) is ignored.
 
-The pure Python loader `load_wall_geometry_from_toml(path)` does not perform this lookup; it uses the path it is given.
+`belief_geometry` selects the file in the node:
+
+- `scenario`: the scenario in `scenario_path`, i.e. the walls of the simulated scenario. The launch files pass the same `scenario_path` to the belief as to the simulator.
+- any other non-empty value: a geometry or scenario file, e.g. `geometry/tank_2x4_two_walls.toml`.
+
+Both follow the path rule of the `scalar_field_sim` nodes (`scalar_field_sim.config.resolve_package_path`): absolute paths are used as given; relative paths are resolved against the installed `scalar_field_sim` share directory (`$(ros2 pkg prefix --share scalar_field_sim)`), e.g. `scenarios/tests/fields/01_single_wall.toml`. Simulator and belief therefore read the same file for the same `scenario_path`. Files are only found there after `colcon build` installed them; rebuild after adding or changing them.
+
+The node logs the file the geometry was loaded from and whether it was selected through the scenario. The pure Python loader `load_wall_geometry_from_toml(path)` does not perform the share-directory lookup; it uses the path it is given.
 
 ### Frames
 
@@ -256,14 +264,23 @@ Walls, measurements, and queries are all interpreted in the configured `frame_id
 
 ### Launching the wall-aware configuration
 
-Reuse the `belief_params` argument of the existing launch file:
+Reuse the `belief_params` argument of the existing launch file and pass the scenario whose walls the belief should use:
 
 ```bash
 ros2 launch scalar_field_belief test_belief.launch.py vehicle_name:=uuv00 \
-  belief_params:=$(ros2 pkg prefix --share scalar_field_belief)/config/belief_params_wall_aware.yaml
+  belief_params:=$(ros2 pkg prefix --share scalar_field_belief)/config/belief_params_wall_aware.yaml \
+  scenario_path:=$(ros2 pkg prefix --share scalar_field_sim)/scenarios/tests/fields/01_single_wall.toml
 ```
 
-`config/belief_params_wall_aware.yaml` uses the same settings as `belief_params_default.yaml`, except `model_variant: wall_aware` and `wall_geometry_file: config/walls/simple_wall_case.toml` (bounds `0..2 x 0..4`).
+`config/belief_params_wall_aware.yaml` uses the same settings as `belief_params_default.yaml`, except `model_variant: wall_aware` and `belief_geometry: scenario` (the scenario bounds must be `0..2 x 0..4`). To use a geometry that differs from the simulated scenario, override `belief_geometry` with a geometry file instead, e.g. in a copy of the YAML file.
+
+`top_field_sim_stack.launch.py` passes its `scenario_path` to both the simulator and the belief; its default scenario (`simple_field_1`) has no walls, so give a scenario with walls when using the wall-aware parameters:
+
+```bash
+ros2 launch scalar_field_belief top_field_sim_stack.launch.py vehicle_name:=uuv00 \
+  belief_params:=$(ros2 pkg prefix --share scalar_field_belief)/config/belief_params_wall_aware.yaml \
+  scenario_path:=$(ros2 pkg prefix --share scalar_field_sim)/scenarios/tests/fields/01_single_wall.toml
+```
 
 
 ## Full Simulation Setup
