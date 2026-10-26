@@ -13,10 +13,12 @@
 # You should have received a copy of the GNU General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-"""Interactive GP/GMRF scalar-field belief playground (no ROS).
+"""Interactive GP/GMRF scalar-field belief playground (no ROS) and live
+belief viewer.
 
 Modules: scenario (scalar_field_sim access), backends (adapters),
 session (observation log, worker, save/load), gui (PySide6 + PyQtGraph),
 launcher (scenario/config lookup, installed entry point), __main__ (command
-line).
+line). Live viewer: live_data (shared state, display resampling), live_ros
+(rclpy subscriber node), live_gui (Qt window), live_main (command line).
 """

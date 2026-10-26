@@ -70,9 +70,9 @@ ros2 launch scalar_field_belief gmrf_belief.launch.py
 
 Without `-DSCALAR_FIELD_BELIEF_BUILD_GMRF=ON` (default OFF) the node is not
 built and rclcpp/toml++ are not needed. The GMRF core and its Python module are
-also built for the belief playground (`-DSCALAR_FIELD_BELIEF_BUILD_PLAYGROUND=ON`,
-default OFF). With both options OFF, the package builds without any C++
-dependencies. If no
+also built for the belief playground (`SCALAR_FIELD_BELIEF_BUILD_PLAYGROUND`,
+default ON; set it OFF on the robot or any machine without the GUI tools). With
+both options OFF, the package builds without any C++ dependencies. If no
 `CMAKE_BUILD_TYPE` is set, the core library alone is compiled with `-O2`;
 `--cmake-args -DCMAKE_BUILD_TYPE=Release` is still recommended.
 
@@ -212,7 +212,7 @@ any numerics. It is used by the belief playground in
 **ROS workspace build:** the `scalar_field_belief` package builds
 the module and installs it into its Python install directory
 (`install/scalar_field_belief/lib/python3.12/site-packages/`) when
-`SCALAR_FIELD_BELIEF_BUILD_PLAYGROUND` is ON (default OFF). It is built for the
+`SCALAR_FIELD_BELIEF_BUILD_PLAYGROUND` is ON (the default). It is built for the
 interpreter that ament uses (`/usr/bin/python3`, Python 3.12) and can be
 imported after sourcing the workspace. The gmrf core is added to the build
 only once, also when `SCALAR_FIELD_BELIEF_BUILD_GMRF=ON`.
