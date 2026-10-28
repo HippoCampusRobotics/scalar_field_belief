@@ -25,11 +25,12 @@
 Attributes: `name` (CLI key), `label` (status text) and `display_name`
 (short panel title, e.g. "GP baseline"). Optional capability:
 `model_grid() -> ModelGridOverlay | None`, the model's own node graph for the
-estimate panel (only the GMRF provides it).
+estimate panel (GMRF: grid edges; visGP: visible reference lattice edges).
 
 Mean is the latent posterior mean in scenario measurement units, variance the
 latent marginal variance in units^2 (no unit conversion anywhere). Positions
-the backend cannot represent (GMRF: hidden behind walls) are NaN.
+the backend cannot represent (GMRF: hidden behind walls; visGP: on a wall)
+are NaN.
 
 Each adapter reads its own existing ROS parameter YAML (`/**: ros__parameters:`)
 and keeps its own schema. The domain bounds are always replaced by the
@@ -44,6 +45,7 @@ import dataclasses
 import hashlib
 import importlib
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -57,8 +59,9 @@ DEFAULT_GP_WALL_AWARE_CONFIG = (
     REPO_ROOT / 'config' / 'belief_params_wall_aware.yaml'
 )
 DEFAULT_GMRF_CONFIG = REPO_ROOT / 'gmrf' / 'ros' / 'belief_params_gmrf.yaml'
+DEFAULT_VISGP_CONFIG = REPO_ROOT / 'config' / 'belief_params_visgp.yaml'
 GMRF_MODULE_NAME = 'scalar_field_belief_gmrf_py'
-BACKEND_NAMES = ('gp', 'gp_wall_aware', 'gmrf')
+BACKEND_NAMES = ('gp', 'gp_wall_aware', 'gmrf', 'visgp')
 
 
 class NotReadyError(RuntimeError):
@@ -285,6 +288,10 @@ _GMRF_UNUSED_KEYS = {
     'publish_visualization': 'ROS visualization only',
     'visualization_grid_step': 'ROS visualization only',
     'z_offset': 'ROS visualization only',
+    'field_color_min': 'ROS visualization only',
+    'field_color_max': 'ROS visualization only',
+    'use_fixed_field_color_max': 'ROS visualization only',
+    'invalid_query_points': 'ROS node only',
 }
 
 
@@ -447,6 +454,231 @@ class GmrfAdapter:
 
 
 # --------------------------------------------------------------------------
+# visGP
+# --------------------------------------------------------------------------
+
+# Parameters in the visGP YAML that the playground does not use.
+_VISGP_UNUSED_KEYS = {
+    'frame_id': 'not used (single frame)',
+    'walls': 'replaced by the scenario walls',
+    'belief_geometry': 'replaced by the scenario walls',
+    'scenario_path': 'replaced by the scenario walls',
+}
+
+
+def _visgp_number(name: str, value, integer: bool):
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise ValueError(f'visGP parameter {name} must be a number: {value!r}')
+    try:
+        number = float(value)
+    except ValueError as exc:
+        raise ValueError(
+            f'visGP parameter {name} must be a number: {value!r}'
+        ) from exc
+    if integer:
+        if not number.is_integer():
+            raise ValueError(
+                f'visGP parameter {name} must be an integer: {value!r}'
+            )
+        return int(number)
+    return number
+
+
+def build_visgp_config(params: dict, domain: Domain):
+    """Map visGP parameters to a VisGPConfig (bounds from the scenario)."""
+    from scalar_field_belief.visgp import VisGPConfig
+
+    fields = {f.name: f for f in dataclasses.fields(VisGPConfig)}
+    kwargs = {}
+    missing = []
+    for name, f in fields.items():
+        if name in params:
+            kwargs[name] = _visgp_number(
+                name, params[name], integer=f.type in ('int', int)
+            )
+        elif f.default is dataclasses.MISSING:
+            missing.append(name)
+    if missing:
+        raise ValueError(
+            f'visGP config is missing required parameters: {missing}'
+        )
+    cfg = VisGPConfig(**kwargs)
+    cfg.validate()
+    bounds = _bounds_override(params, domain)
+    unknown = sorted(
+        set(params)
+        - set(fields)
+        - set(_VISGP_UNUSED_KEYS)
+        - {'x_min', 'x_max', 'y_min', 'y_max'}
+    )
+    snapshot = {
+        'effective': {
+            **bounds['used'],
+            **{name: getattr(cfg, name) for name in fields},
+        },
+        'bounds_override': bounds,
+        'unused_parameters': {
+            k: reason for k, reason in _VISGP_UNUSED_KEYS.items() if k in params
+        },
+        'unknown_parameters_ignored': unknown,
+    }
+    return cfg, snapshot
+
+
+class VisGPAdapter:
+    """Adapter for scalar_field_belief.visgp.VisGPBelief (pure Python)."""
+
+    name = 'visgp'
+
+    def __init__(self, domain: Domain, config_path: str | Path | None = None):
+        import scipy
+
+        from scalar_field_belief.geometry import WallGeometry, WallSegment
+        from scalar_field_belief.visgp import VisGPBelief
+
+        params, file_record = load_ros_params(
+            config_path or DEFAULT_VISGP_CONFIG
+        )
+        cfg, snapshot = build_visgp_config(params, domain)
+        geometry = WallGeometry(
+            name='scenario',
+            x_range=domain.x_range,
+            y_range=domain.y_range,
+            walls=tuple(WallSegment(start=a, end=b) for a, b in domain.walls),
+        )
+        t0 = time.perf_counter()
+        self.belief = VisGPBelief(cfg, geometry)
+        construction_ms = (time.perf_counter() - t0) * 1e3
+        belief = self.belief
+        grid = belief.reference_grid
+        num_nodes = len(belief.reference_locations)
+        self.label = (
+            f'visGP ({num_nodes} reference nodes, k={cfg.max_neighbors})'
+        )
+        self.display_name = 'visGP'
+        self.unit = domain.unit
+        self._last_query = self._query_counts(None)
+        self._model_grid = None  # built on first model_grid() call
+        reference_set = {
+            'construction': 'cell-centred grid from the domain bounds and '
+            'walls (nodes on walls dropped)',
+            'nx': grid.nx,
+            'ny': grid.ny,
+            'dx': grid.dx,
+            'dy': grid.dy,
+            'num_nodes': num_nodes,
+            'dropped_on_wall': grid.dropped_on_wall,
+            'locations': belief.reference_locations.tolist(),
+        }
+        self._snapshot = {
+            'backend': 'visgp',
+            'implementation': 'scalar_field_belief.visgp.VisGPBelief',
+            'config_file': file_record,
+            'effective': {
+                **snapshot['effective'],
+                'parent_covariance': 'isotropic Matern-3/2',
+                'neighbour_rule': 'nearest clique, scan stops at the first '
+                'incompatible candidate',
+                'contact_tolerance_m': belief.contact_tolerance,
+                'reference_set': reference_set,
+            },
+            'bounds_override': snapshot['bounds_override'],
+            'unused_parameters': snapshot['unused_parameters'],
+            'unknown_parameters_ignored': snapshot[
+                'unknown_parameters_ignored'
+            ],
+            'covariance_selection': {
+                **belief.covariance_selection.summary(),
+                'construction_ms': construction_ms,
+                'scipy_version': scipy.__version__,
+            },
+            'walls_used': [list(a) + list(b) for a, b in domain.walls],
+            'readiness': 'latent prior available immediately',
+            'value_unit': domain.unit,
+        }
+
+    def reset(self) -> None:
+        self.belief.reset()
+
+    def add_measurement(self, x: float, y: float, value: float) -> None:
+        self.belief.add_measurement(float(x), float(y), float(value))
+
+    def is_ready(self) -> bool:
+        return True
+
+    def not_ready_reason(self) -> str:
+        return ''
+
+    def num_assimilated(self) -> int:
+        return int(self.belief.num_measurements)
+
+    @staticmethod
+    def _query_counts(prediction) -> dict:
+        if prediction is None:
+            return {
+                'cells': 0,
+                'invalid_cells': 0,
+                'residual_clamps': 0,
+                'variance_clamps': 0,
+            }
+        return {
+            'cells': int(prediction.valid.size),
+            'invalid_cells': int((~prediction.valid).sum()),
+            'residual_clamps': prediction.residual_clamps,
+            'variance_clamps': prediction.variance_clamps,
+        }
+
+    @property
+    def hidden_cells(self) -> int:
+        """Query points of the last query() on a wall or outside (NaN)."""
+        return self._last_query['invalid_cells']
+
+    @property
+    def last_query_counts(self) -> dict:
+        """Cells, invalid cells and roundoff clamps (F, posterior variance)
+        of the last query()."""
+        return dict(self._last_query)
+
+    def query(self, xy: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        prediction = self.belief.predict_marginal(np.asarray(xy, dtype=float))
+        self._last_query = self._query_counts(prediction)
+        return prediction.mean, prediction.variance
+
+    def effective_config(self) -> dict:
+        snapshot = copy.deepcopy(self._snapshot)
+        snapshot['last_query'] = self.last_query_counts
+        return snapshot
+
+    def model_grid(self) -> ModelGridOverlay | None:
+        """Reference nodes and the visible edges between lattice neighbours
+        (display only: a subset of the visibility graph, which also links
+        distant visible nodes). Fixed for this configuration; cached."""
+        grid = self.belief.reference_grid
+        if self._model_grid is None and grid is not None:
+            xy = self.belief.reference_locations
+            index = {
+                (i, j): k
+                for k, (i, j) in enumerate(grid.lattice_index.tolist())
+            }
+            pairs = [
+                (k, other)
+                for (i, j), k in index.items()
+                for other in (index.get((i + 1, j)), index.get((i, j + 1)))
+                if other is not None and self.belief.adjacency[k, other]
+            ]
+            pairs = np.asarray(pairs, dtype=np.intp).reshape(-1, 2)
+            self._model_grid = ModelGridOverlay(
+                segments=np.stack([xy[pairs[:, 0]], xy[pairs[:, 1]]], axis=1),
+                nodes=np.array(xy),
+                nx=grid.nx,
+                ny=grid.ny,
+                dx=grid.dx,
+                dy=grid.dy,
+            )
+        return self._model_grid
+
+
+# --------------------------------------------------------------------------
 
 
 class UnavailableBackend:
@@ -487,6 +719,7 @@ def make_backends(
     gmrf_config: str | Path | None = None,
     gmrf_module_dir: str | Path | None = None,
     gp_wall_aware_config: str | Path | None = None,
+    visgp_config: str | Path | None = None,
 ) -> dict:
     """Construct the selected adapters; failures become UnavailableBackend."""
     backends = {}
@@ -504,6 +737,8 @@ def make_backends(
                     gp_wall_aware_config or DEFAULT_GP_WALL_AWARE_CONFIG,
                     name=name,
                 )
+            elif name == 'visgp':
+                backends[name] = VisGPAdapter(domain, visgp_config)
             else:
                 backends[name] = GmrfAdapter(
                     domain, gmrf_config, gmrf_module_dir

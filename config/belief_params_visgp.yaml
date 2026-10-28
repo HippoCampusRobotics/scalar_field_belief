@@ -1,0 +1,44 @@
+# Parameters of the visGP belief (scalar_field_belief.visgp.VisGPBelief), read
+# by the belief playground (--visgp-config). There is no visGP ROS node yet;
+# the file uses the ROS parameter layout of the other belief configurations.
+# Nothing is fitted: all values stay fixed.
+#
+# Units: positions in meters; "units" = measurement unit of the scalar value
+# (the scenario unit, e.g. V). signal_variance and measurement_noise_variance
+# are VARIANCES (units^2), not standard deviations. Prefer floats with a decimal
+# point and a signed exponent (1.0e-4): PyYAML reads 1e-4 as a string, which
+# the playground converts, but other YAML readers may not.
+/**:
+  ros__parameters:
+    # Domain [m]. The playground replaces it with the scenario bounds.
+    x_min: 0.0
+    x_max: 2.0
+    y_min: 0.0
+    y_max: 4.0
+
+    # Fixed prior. Parent covariance (isotropic Matern-3/2):
+    #   C(d) = signal_variance * (1 + sqrt(3) d / lengthscale)
+    #          * exp(-sqrt(3) d / lengthscale)
+    prior_mean: 0.0                     # constant prior mean [units]
+    signal_variance: 1.0e-4             # [units^2] (prior std 0.01 units)
+    lengthscale: 0.5                    # [m]
+    # Independent Gaussian sensor noise of every observation, added after
+    # the latent visGP (not part of covariance selection).
+    measurement_noise_variance: 2.5e-7  # [units^2] (noise std 5.0e-4 units)
+
+    # Fixed reference set: cell-centred grid with nx = round(width / spacing),
+    # ny = round(height / spacing); nodes on walls are dropped. It depends only
+    # on the bounds, the walls and these values (2 m x 4 m: 8 x 16 = 128 nodes).
+    reference_spacing: 0.25             # [m]
+    max_reference_nodes: 200            # dense limit; larger grids are an error
+    # Nearest-clique neighbour cap k for positions outside the reference set.
+    max_neighbors: 8
+
+    # Covariance selection (iterative proportional scaling over the maximal
+    # cliques of the visibility graph).
+    covsel_tolerance: 1.0e-10           # max |L - K| on diagonal and visible pairs / signal_variance
+    covsel_precision_tolerance: 1.0e-9  # max |P_ij| / sqrt(P_ii P_jj), P = inv(L), non-visible pairs
+    covsel_max_iterations: 500          # bound on the number of sweeps
+    max_cliques: 2000                   # bound on the number of maximal cliques
+
+    max_joint_query_size: 2000          # largest full-covariance query

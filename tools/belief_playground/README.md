@@ -1,4 +1,4 @@
-# Belief playground (GP / GMRF)
+# Belief playground (GP / GMRF / visGP)
 
 Interactive tester for the scalar-field beliefs. Click a position on a map:
 the tool samples the scenario there, adds one scalar observation to every
@@ -12,6 +12,9 @@ only (no flow measurements, no source localisation).
   `gp_wall_aware` only accepts a config with `model_variant: wall_aware`.
 * **GMRF**: the C++ `scalar_field_belief::gmrf::GmrfBelief`, called through the
   pybind11 module `scalar_field_belief_gmrf_py` (`gmrf/python/`).
+* **visGP** (`visgp`): `scalar_field_belief.visgp.VisGPBelief`, a dense
+  visibility-graph GP with fixed parameters, called directly in Python
+  (NumPy/SciPy). Not selected by default; see [visGP](#visgp).
 * **Scenario / truth**: `scalar_field_sim.config.load_field_from_toml` and
   `field.evaluate()`.
 * **GUI**: PySide6 + PyQtGraph. `belief_playground` is a plain Qt
@@ -23,11 +26,12 @@ only (no flow measurements, no source localisation).
 ```text
 tools/belief_playground/
   belief_playground/scenario.py   scenario + truth (controller only), display grid
-  belief_playground/backends.py   GPAdapter, GmrfAdapter (reset/add_measurement/query[/model_grid])
+  belief_playground/backends.py   GPAdapter, GmrfAdapter, VisGPAdapter (reset/add_measurement/query[/model_grid])
   belief_playground/session.py    observation log, worker thread, save/load (no GUI)
   belief_playground/gui.py        Qt window
   belief_playground/launcher.py   scenario/config lookup, installed entry point
   belief_playground/__main__.py   command line
+  belief_playground/visgp_diagnostics.py  headless visGP checks
   belief_playground/live_data.py  live viewer: shared state, display resampling (no Qt, no ROS)
   belief_playground/live_ros.py   live viewer: rclpy subscriber node (no Qt)
   belief_playground/live_gui.py   live viewer: Qt window (no rclpy)
@@ -44,7 +48,8 @@ tools/belief_playground/
 * Python packages, installed in the Python environment that `python3` refers
   to when you run the tool. The installed executable uses
   `#!/usr/bin/env python3`, the same as the GP node. You need the GP
-  dependencies (`torch`, `gpytorch`, as for the GP node) plus the GUI:
+  dependencies (`torch`, `gpytorch`, as for the GP node), SciPy for visGP
+  (`python3-scipy`) plus the GUI:
 
   ```bash
   python3 -m pip install PySide6-Essentials pyqtgraph
@@ -111,10 +116,11 @@ configs are the checkout's files.
 | --- | --- | --- |
 | `--scenario NAME\|FILE` | `01_single_wall` | scenario TOML path, or the name of an installed scenario (`01_single_wall`, or `tests/fields/01_single_wall` to disambiguate) |
 | `--list-scenarios` | | list installed scenario names and exit |
-| `--backends` | `gp,gp_wall_aware,gmrf` | ordered, comma-separated subset of `gp`, `gp_wall_aware`, `gmrf`; one column each |
+| `--backends` | `gp,gp_wall_aware,gmrf` | ordered, comma-separated subset of `gp`, `gp_wall_aware`, `gmrf`, `visgp`; one column each |
 | `--gp-config YAML` | installed `config/belief_params_default.yaml` | GP ROS parameter file for `gp` |
 | `--gp-wall-aware-config YAML` | installed `config/belief_params_wall_aware.yaml` | GP ROS parameter file for `gp_wall_aware` (`model_variant: wall_aware`) |
 | `--gmrf-config YAML` | installed `config/belief_params_gmrf.yaml` | GMRF ROS parameter file |
+| `--visgp-config YAML` | installed `config/belief_params_visgp.yaml` | visGP parameter file (ROS parameter layout; only read if `visgp` is selected) |
 | `--grid-step M` | `0.05` | display/evaluation grid spacing [m] (not the GMRF model grid) |
 | `--noise-std S` | `0` (off) | observation noise std for sampled values, in the scenario unit |
 | `--seed N` | scenario seed, else 0 | noise generator seed |
@@ -130,9 +136,11 @@ directories, the error lists the candidates.
 Backend configuration: each adapter reads its own ROS parameter YAML
 (`/**: ros__parameters:`) with PyYAML. The domain bounds are always taken from
 the scenario, and so are the known walls (`belief_geometry`, `scenario_path`,
-and `walls` in the YAML are ignored). The wall-aware GP gets the scenario walls as its
-`WallGeometry`. The GMRF keeps `nx`/`ny` from its YAML, so `dx`/`dy` follow the
-scenario bounds. All overrides are recorded in the configuration snapshot
+and `walls` in the YAML are ignored). The wall-aware GP gets the scenario
+walls as its `WallGeometry`. The GMRF keeps `nx`/`ny` from its YAML, so
+`dx`/`dy` follow the scenario bounds. visGP gets the scenario walls as its
+`WallGeometry` and builds its reference grid from the scenario bounds and
+`reference_spacing`. All overrides are recorded in the configuration snapshot
 saved with each session. If a required parameter is missing, that backend is
 shown as unavailable and the others keep working.
 
@@ -163,7 +171,11 @@ Ground truth        | GP baseline - estimate           | GP wall-aware - estimat
 * Walls (white with a black outline) are drawn on every map. The GMRF estimate
   panel also shows the GMRF's own model graph (thin translucent lines): node
   spacing from the model, without edges cut by walls or touching inactive
-  nodes. The geometry is read once from the module (`model_grid()`).
+  nodes. The geometry is read once from the module (`model_grid()`). The
+  visGP estimate panel draws its reference lattice the same way: lines
+  between neighbouring reference nodes that see each other (the nodes
+  themselves are not marked). This is only a display subset of the
+  visibility graph, which also links distant visible nodes.
 * Measurements are numbered red circles on every map. The **Show measurement
   positions** checkbox at the right end of the toolbar shows or hides them
   immediately. `--hide-measurements` starts with it unticked. This only
@@ -201,7 +213,8 @@ Ground truth        | GP baseline - estimate           | GP wall-aware - estimat
   Hover over the status bar for details. A backend that rejected an
   observation is marked **STOPPED n=k/N (#m failed)** in the status bar and
   in its panel titles. Its maps keep its last good result. The GP shows
-  *waiting* until its first configured fit.
+  *waiting* until its first configured fit. The GMRF and visGP show their
+  prior immediately.
 * Timings are wall-clock times of the most recent job in the worker thread
   (details in the status tooltip):
   * `assimilate X ms`: the job that added the newest observation.
@@ -211,6 +224,8 @@ Ground truth        | GP baseline - estimate           | GP wall-aware - estimat
       lazily in the next query, so it counts as grid query.
     * GMRF: `add_measurement` plus the sparse `update()` solve (posterior
       mean).
+    * visGP: storing it plus a batch re-conditioning on all stored
+      observations (dense Cholesky).
   * `reset+replay K obs X ms`: after Undo/Reset/Load, the backend reset plus
     re-assimilation of all K stored observations.
   * `grid query X ms (N cells)`: one query on all N display cells.
@@ -218,6 +233,8 @@ Ground truth        | GP baseline - estimate           | GP wall-aware - estimat
       cubically with the number of observations), plus mean and variance.
     * GMRF: representability mask plus mean and marginal variances (sparse
       solves).
+    * visGP: validity mask, visibility and neighbour sets of every cell,
+      then mean and marginal variances (dense, in blocks).
     * It scales with `--grid-step` (N), not only with the model size.
 
 Responsiveness: clicks only append to the log. One worker thread runs all
@@ -240,7 +257,10 @@ received. Undo and load replay the stored values without drawing new noise.
 * the noise settings (`seed_in_use`, `pending_seed`, draws);
 * the display grid;
 * each backend's effective configuration (YAML text + sha256) and status at
-  save time;
+  save time; for visGP also the reference locations and the covariance
+  selection diagnostics (sweeps, residuals, eigenvalues, time) and the
+  counts of the last grid query (`last_query`: invalid cells, roundoff
+  clamps);
 * the display state (colour ranges, `show_measurements`);
 * Git state of `scalar_field_belief` and `scalar_field_sim`;
 * package versions, including PySide6 and pyqtgraph.
@@ -258,6 +278,76 @@ s = Session(sc, make_backends(['gp', 'gp_wall_aware', 'gmrf'], sc.domain),
             make_display_grid(sc.domain.x_range, sc.domain.y_range, 0.05))
 s.add_sample(0.5, 1.0); s.wait_idle(); _, status, _, _ = s.poll(); s.close()
 ```
+
+## visGP
+
+`visgp` adds `scalar_field_belief.visgp.VisGPBelief` (model, configuration
+and limitations: see the package [readme](../../readme.md#visgp-belief)). It
+receives exactly the same observations as the other backends, at their actual
+positions; the reference set and covariance selection are built once from the
+scenario bounds and walls and do not depend on the display grid. The prior is
+shown before the first observation. Display cells and clicks within 1e-9 x the
+domain extent of a wall are invalid for visGP: such cells are grey, and an
+observation there marks visGP as **STOPPED** (undo it to recover); the other
+backends continue. The belief, including covariance selection, is built
+before the window opens. This takes seconds for geometries with openings
+(about 6.5 s for `02_wall_with_gap` with the default settings and an
+unoptimised reference BLAS) and grows quickly with finer reference grids or
+longer lengthscales (see the package readme).
+
+Compare it with the baseline GP, without sourcing ROS, from the workspace root:
+
+```bash
+env -u PYTHONPATH -u AMENT_PREFIX_PATH \
+  PYTHONPATH=src/scalar_field_belief:src/scalar_field_belief/tools/belief_playground:src/scalar_field_sim \
+  python3 -m belief_playground --scenario 01_single_wall --backends gp,visgp
+```
+
+`belief_playground.visgp_diagnostics` is a headless numerical check that
+reuses the scenario, session and export code (Qt only with `--export-image`):
+
+```bash
+env -u PYTHONPATH -u AMENT_PREFIX_PATH \
+  PYTHONPATH=src/scalar_field_belief:src/scalar_field_belief/tools/belief_playground:src/scalar_field_sim \
+  python3 -m belief_playground.visgp_diagnostics [--out-dir DIR] \
+  [--scenarios 00_open,01_single_wall,02_wall_with_gap] \
+  [--visgp-config YAML] [--export-image]
+```
+
+* `--visgp-config` selects the visGP parameter file of the scenario runs
+  (default: `config/belief_params_visgp.yaml` of the checkout, else of the
+  installed share). The small hand-made geometries use fixed settings.
+* Model invariants on three small hand-made geometries and on the scenario
+  reference grids: visibility predicate; covariance selection residuals
+  recomputed from `L`, `K` and `G`, and an independent solver; `L = K`
+  without walls; disconnected components; mixed reference/off-reference
+  joint covariance; nearest-clique neighbour sets and rows against an
+  independent re-implementation; repeated off-reference observations;
+  batching and display-grid independence; a dense Gaussian oracle built from
+  the independent rows; reset/undo/save/load through the session; and the
+  noise-order example. Values use the scenario unit.
+* Every check ends as passed, failed or not run. Checks of default scenarios
+  left out with `--scenarios` are not run, and an unavailable backend fails
+  its checks with the message. `report.md` and `report.json` list the three
+  groups. Exit code: 0 if everything passed, 1 if a check failed, 3 if none
+  failed but some did not run; 2 is a usage error (argparse), including
+  `--export-image` without a display.
+* Reconstruction quality (reported only): for each scenario, the baseline GP
+  and visGP after the same four noise-free samples left of the wall: RMSE
+  against the truth, mean and std next to the wall on both sides and at the
+  wall ends or opening, the largest mean jump between neighbouring cells,
+  `F / signal_variance` statistics, and timings.
+* Output: `./belief_playground_sessions/visgp_diagnostics/<UTC time>/`
+  relative to the current directory (or `--out-dir`): `report.md`,
+  `report.json`, `arrays.npz`, the sessions (CSV + JSON as saved by the
+  playground) and, with `--export-image`, a PNG of the playground window per
+  scenario. The reports are written before Qt is started. The image export
+  needs a display: without `DISPLAY` or `WAYLAND_DISPLAY` (and without
+  `QT_QPA_PLATFORM=offscreen`) the diagnostic stops at once with an error
+  and does not start Qt. On a machine without a desktop run it under
+  `xvfb-run` with `QT_QPA_PLATFORM=xcb`. Only the variables are checked: a set
+  but stale `DISPLAY` (no reachable X server) is not detected, so use a
+  working display or `xvfb-run`.
 
 ## Live viewer
 
@@ -464,6 +554,16 @@ random namespace. GMRF binding tests: see `gmrf/README.md`.
 * `backend gmrf unavailable: ModuleNotFoundError ... scalar_field_belief_gmrf_py`:
   rebuild the workspace with the playground enabled (the default) and source
   it. A Python version mismatch is reported with both interpreters.
+* `unknown backend 'visgp'` or a missing `belief_params_visgp.yaml` with
+  `ros2 run`: the installed package predates visGP; rebuild the workspace so
+  that `scalar_field_belief.visgp` and `config/belief_params_visgp.yaml` are
+  installed.
+* visGP **STOPPED** at observation #k: the position is on a wall (within the
+  contact tolerance). Undo it. `backend visgp unavailable:
+  CovarianceSelectionError ...` means the configured reference grid did not
+  converge within `covsel_max_iterations` or has more than `max_cliques`
+  cliques; a grid larger than `max_reference_nodes` is reported as a
+  `ValueError` with its size.
 * `unknown scenario`: see `--list-scenarios`. Rebuild `scalar_field_sim` after
   adding scenarios, or pass a TOML path.
 * GP panels stay grey with *waiting*: the GP has not reached its first

@@ -29,6 +29,7 @@ from belief_playground.launcher import (
     ResourceError,
     available_scenarios,
     default_configs,
+    default_visgp_config,
     resolve_scenario,
     scenario_roots,
 )
@@ -40,8 +41,8 @@ def parse_args(argv=None, prog: str | None = None):
     p = argparse.ArgumentParser(
         prog=prog or 'python -m belief_playground',
         description='Click a scenario map to add scalar observations and compare '
-        'the baseline GP, wall-aware GP and GMRF beliefs (Qt window, no ROS '
-        'nodes).',
+        'the baseline GP, wall-aware GP, GMRF and visGP beliefs (Qt window, no '
+        'ROS nodes).',
     )
     p.add_argument(
         '--scenario',
@@ -78,6 +79,12 @@ def parse_args(argv=None, prog: str | None = None):
         type=Path,
         default=None,
         help='GMRF ROS parameter YAML (default: config/belief_params_gmrf.yaml)',
+    )
+    p.add_argument(
+        '--visgp-config',
+        type=Path,
+        default=None,
+        help='visGP parameter YAML (default: config/belief_params_visgp.yaml)',
     )
     p.add_argument(
         '--gmrf-module-dir', type=Path, default=None, help=argparse.SUPPRESS
@@ -171,6 +178,9 @@ def build_session(args, installed: bool = False) -> Session:
         gp_config = gp_config or default_gp
         gp_wall_aware_config = gp_wall_aware_config or default_gp_wall_aware
         gmrf_config = gmrf_config or default_gmrf
+    visgp_config = getattr(args, 'visgp_config', None)
+    if 'visgp' in names and visgp_config is None:
+        visgp_config = default_visgp_config(installed)
     backends = make_backends(
         names,
         scenario.domain,
@@ -178,6 +188,7 @@ def build_session(args, installed: bool = False) -> Session:
         gmrf_config,
         args.gmrf_module_dir,
         gp_wall_aware_config=gp_wall_aware_config,
+        visgp_config=visgp_config,
     )
     for name, b in backends.items():
         reason = getattr(b, 'unavailable_reason', None)

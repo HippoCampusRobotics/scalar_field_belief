@@ -26,7 +26,8 @@ or creates nodes.
   file paths are used as given.
 * Default backend configs: the installed launcher uses
   `share/scalar_field_belief/config/`; `python -m belief_playground` from a
-  source checkout uses the checkout's files (falling back to the share).
+  source checkout uses the checkout's files (falling back to the share). The
+  visGP config is looked up only when the visgp backend is selected.
 """
 
 from __future__ import annotations
@@ -38,12 +39,14 @@ from belief_playground.backends import (
     DEFAULT_GMRF_CONFIG,
     DEFAULT_GP_CONFIG,
     DEFAULT_GP_WALL_AWARE_CONFIG,
+    DEFAULT_VISGP_CONFIG,
 )
 
 DEFAULT_SCENARIO = '01_single_wall'
 GP_CONFIG_NAME = 'belief_params_default.yaml'
 GP_WALL_AWARE_CONFIG_NAME = 'belief_params_wall_aware.yaml'
 GMRF_CONFIG_NAME = 'belief_params_gmrf.yaml'
+VISGP_CONFIG_NAME = 'belief_params_visgp.yaml'
 
 
 class ResourceError(RuntimeError):
@@ -165,6 +168,19 @@ def default_configs(installed: bool) -> tuple[Path, Path, Path]:
         share / 'config' / GP_WALL_AWARE_CONFIG_NAME,
         share / 'config' / GMRF_CONFIG_NAME,
     )
+
+
+def default_visgp_config(installed: bool) -> Path:
+    """visGP config used when no --visgp-config is given."""
+    if not installed and DEFAULT_VISGP_CONFIG.is_file():
+        return DEFAULT_VISGP_CONFIG
+    share = package_share('scalar_field_belief')
+    if share is None:
+        raise ResourceError(
+            'cannot find share/scalar_field_belief (is the workspace '
+            'sourced?); pass --visgp-config explicitly'
+        )
+    return share / 'config' / VISGP_CONFIG_NAME
 
 
 def main() -> int:
