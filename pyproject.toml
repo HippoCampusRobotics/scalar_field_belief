@@ -10,10 +10,10 @@ name = "scalar-field-belief"
 version = "0.0.0"
 description = "Exact-GP scalar field belief (optionally wall-aware) based on GPyTorch"
 requires-python = ">=3.11"
-dependencies = ["numpy", "torch", "gpytorch"]
+dependencies = ["numpy", "scipy", "torch", "gpytorch"]
 
 [tool.setuptools]
-packages = ["scalar_field_belief"]
+packages = ["scalar_field_belief", "scalar_field_belief.visgp"]
 
 [tool.ruff]
 line-length = 80

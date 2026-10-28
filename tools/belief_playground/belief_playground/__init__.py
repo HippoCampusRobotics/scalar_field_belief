@@ -19,6 +19,7 @@ belief viewer.
 Modules: scenario (scalar_field_sim access), backends (adapters),
 session (observation log, worker, save/load), gui (PySide6 + PyQtGraph),
 launcher (scenario/config lookup, installed entry point), __main__ (command
-line). Live viewer: live_data (shared state, display resampling), live_ros
-(rclpy subscriber node), live_gui (Qt window), live_main (command line).
+line), visgp_diagnostics (headless visGP checks). Live viewer: live_data
+(shared state, display resampling), live_ros (rclpy subscriber node),
+live_gui (Qt window), live_main (command line).
 """

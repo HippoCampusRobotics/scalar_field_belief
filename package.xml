@@ -36,6 +36,8 @@
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>hippo_common</exec_depend>
   <exec_depend>python3-matplotlib</exec_depend>
+  <!-- visGP belief (scalar_field_belief.visgp): dense linear algebra. -->
+  <exec_depend>python3-scipy</exec_depend>
   <!-- belief_live_viewer (installed with the playground): odometry poses. -->
   <exec_depend>nav_msgs</exec_depend>
   <!-- Scenarios and simulation nodes for top_field_sim_stack.launch.py and the playground. -->
