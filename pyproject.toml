@@ -13,7 +13,11 @@ requires-python = ">=3.11"
 dependencies = ["numpy", "scipy", "torch", "gpytorch"]
 
 [tool.setuptools]
-packages = ["scalar_field_belief", "scalar_field_belief.visgp"]
+packages = [
+    "scalar_field_belief",
+    "scalar_field_belief.attentive",
+    "scalar_field_belief.visgp",
+]
 
 [tool.ruff]
 line-length = 80
