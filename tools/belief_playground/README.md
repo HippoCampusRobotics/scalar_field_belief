@@ -1,4 +1,4 @@
-# Belief playground (GP / GMRF / visGP)
+# Belief playground (GP / GMRF / visGP / GP Attentive Kernel)
 
 Interactive tester for the scalar-field beliefs. Click a position on a map:
 the tool samples the scenario there, adds one scalar observation to every
@@ -15,6 +15,11 @@ only (no flow measurements, no source localisation).
 * **visGP** (`visgp`): `scalar_field_belief.visgp.VisGPBelief`, a dense
   visibility-graph GP with fixed parameters, called directly in Python
   (NumPy/SciPy). Not selected by default; see [visGP](#visgp).
+* **GP Attentive Kernel** (`gp_attentive`):
+  `scalar_field_belief.attentive.AttentiveGPBelief`, an exact GP with the
+  learned Attentive Kernel (PyTorch/GPyTorch), called directly in Python. It
+  receives positions and values only (no walls). Not selected by default;
+  see [GP Attentive Kernel](#gp-attentive-kernel).
 * **Scenario / truth**: `scalar_field_sim.config.load_field_from_toml` and
   `field.evaluate()`.
 * **GUI**: PySide6 + PyQtGraph. `belief_playground` is a plain Qt
@@ -26,12 +31,13 @@ only (no flow measurements, no source localisation).
 ```text
 tools/belief_playground/
   belief_playground/scenario.py   scenario + truth (controller only), display grid
-  belief_playground/backends.py   GPAdapter, GmrfAdapter, VisGPAdapter (reset/add_measurement/query[/model_grid])
+  belief_playground/backends.py   GPAdapter, GmrfAdapter, VisGPAdapter, AttentiveGPAdapter (reset/add_measurement/query[/model_grid/status_lines])
   belief_playground/session.py    observation log, worker thread, save/load (no GUI)
   belief_playground/gui.py        Qt window
   belief_playground/launcher.py   scenario/config lookup, installed entry point
   belief_playground/__main__.py   command line
   belief_playground/visgp_diagnostics.py  headless visGP checks
+  belief_playground/attentive_diagnostics.py  headless Attentive Kernel GP checks
   belief_playground/live_data.py  live viewer: shared state, display resampling (no Qt, no ROS)
   belief_playground/live_ros.py   live viewer: rclpy subscriber node (no Qt)
   belief_playground/live_gui.py   live viewer: Qt window (no rclpy)
@@ -116,11 +122,12 @@ configs are the checkout's files.
 | --- | --- | --- |
 | `--scenario NAME\|FILE` | `01_single_wall` | scenario TOML path, or the name of an installed scenario (`01_single_wall`, or `tests/fields/01_single_wall` to disambiguate) |
 | `--list-scenarios` | | list installed scenario names and exit |
-| `--backends` | `gp,gp_wall_aware,gmrf` | ordered, comma-separated subset of `gp`, `gp_wall_aware`, `gmrf`, `visgp`; one column each |
+| `--backends` | `gp,gp_wall_aware,gmrf` | ordered, comma-separated subset of `gp`, `gp_wall_aware`, `gmrf`, `visgp`, `gp_attentive`; one column each |
 | `--gp-config YAML` | installed `config/belief_params_default.yaml` | GP ROS parameter file for `gp` |
 | `--gp-wall-aware-config YAML` | installed `config/belief_params_wall_aware.yaml` | GP ROS parameter file for `gp_wall_aware` (`model_variant: wall_aware`) |
 | `--gmrf-config YAML` | installed `config/belief_params_gmrf.yaml` | GMRF ROS parameter file |
 | `--visgp-config YAML` | installed `config/belief_params_visgp.yaml` | visGP parameter file (ROS parameter layout; only read if `visgp` is selected) |
+| `--gp-attentive-config YAML` | installed `config/belief_params_attentive.yaml` | Attentive Kernel GP parameter file (ROS parameter layout; only read if `gp_attentive` is selected) |
 | `--grid-step M` | `0.05` | display/evaluation grid spacing [m] (not the GMRF model grid) |
 | `--noise-std S` | `0` (off) | observation noise std for sampled values, in the scenario unit |
 | `--seed N` | scenario seed, else 0 | noise generator seed |
@@ -140,8 +147,9 @@ and `walls` in the YAML are ignored). The wall-aware GP gets the scenario
 walls as its `WallGeometry`. The GMRF keeps `nx`/`ny` from its YAML, so
 `dx`/`dy` follow the scenario bounds. visGP gets the scenario walls as its
 `WallGeometry` and builds its reference grid from the scenario bounds and
-`reference_spacing`. All overrides are recorded in the configuration snapshot
-saved with each session. If a required parameter is missing, that backend is
+`reference_spacing`. The GP Attentive Kernel gets the scenario bounds only, no
+walls. All overrides are recorded in the configuration snapshot saved with
+each session. If a required parameter is missing, that backend is
 shown as unavailable and the others keep working.
 
 ## Window
@@ -213,19 +221,26 @@ Ground truth        | GP baseline - estimate           | GP wall-aware - estimat
   Hover over the status bar for details. A backend that rejected an
   observation is marked **STOPPED n=k/N (#m failed)** in the status bar and
   in its panel titles. Its maps keep its last good result. The GP shows
-  *waiting* until its first configured fit. The GMRF and visGP show their
-  prior immediately.
+  *waiting* until its first configured fit. The GMRF, visGP and GP Attentive
+  Kernel show their prior immediately. For the GP Attentive Kernel the
+  tooltip also lists its training phase, event and step counts, the loss
+  before and after the last event, and conditioning versus optimization
+  time.
 * Timings are wall-clock times of the most recent job in the worker thread
   (details in the status tooltip):
   * `assimilate X ms`: the job that added the newest observation.
-    * GP: storing it (plus target standardisation) and, when `refit_policy`
-      says so, hyperparameter training; otherwise only `set_train_data`.
+    * GP: storing it (plus re-estimating the target offset and scale in
+      `target_transform_mode: standardize`) and, when `refit_policy` says
+      so, hyperparameter training; otherwise only `set_train_data`.
       The GP posterior solve is **not** included here. GPyTorch builds it
       lazily in the next query, so it counts as grid query.
     * GMRF: `add_measurement` plus the sparse `update()` solve (posterior
       mean).
     * visGP: storing it plus a batch re-conditioning on all stored
       observations (dense Cholesky).
+    * GP Attentive Kernel: storing it, an optimization event when one is
+      due, and the exact Cholesky factorization that every later query
+      reuses.
   * `reset+replay K obs X ms`: after Undo/Reset/Load, the backend reset plus
     re-assimilation of all K stored observations.
   * `grid query X ms (N cells)`: one query on all N display cells.
@@ -235,6 +250,8 @@ Ground truth        | GP baseline - estimate           | GP wall-aware - estimat
       solves).
     * visGP: validity mask, visibility and neighbour sets of every cell,
       then mean and marginal variances (dense, in blocks).
+    * GP Attentive Kernel: kernel rows of every cell against the stored
+      observations and triangular solves (in blocks), no training.
     * It scales with `--grid-step` (N), not only with the model size.
 
 Responsiveness: clicks only append to the log. One worker thread runs all
@@ -260,7 +277,11 @@ received. Undo and load replay the stored values without drawing new noise.
   save time; for visGP also the reference locations and the covariance
   selection diagnostics (sweeps, residuals, eigenvalues, time) and the
   counts of the last grid query (`last_query`: invalid cells, roundoff
-  clamps);
+  clamps); for the GP Attentive Kernel also the derived settings (normalizer,
+  lengthscales in meters, optimizer, sha256 of the seeded initial network),
+  the training status and the fitted summary at save time. Only `effective`
+  (configuration, derived settings and network digest) is compared on load,
+  so a torch version that initializes a different network is reported;
 * the display state (colour ranges, `show_measurements`);
 * Git state of `scalar_field_belief` and `scalar_field_sim`;
 * package versions, including PySide6 and pyqtgraph.
@@ -348,6 +369,73 @@ env -u PYTHONPATH -u AMENT_PREFIX_PATH \
   `xvfb-run` with `QT_QPA_PLATFORM=xcb`. Only the variables are checked: a set
   but stale `DISPLAY` (no reachable X server) is not detected, so use a
   working display or `xvfb-run`.
+
+## GP Attentive Kernel
+
+`gp_attentive` adds `scalar_field_belief.attentive.AttentiveGPBelief` (model,
+training policy, configuration and limitations: see the package
+[readme](../../readme.md#attentive-kernel-gp-belief)). It receives exactly the
+same observations as the other backends and nothing else: no walls, scenario
+truth or source information. Walls are only drawn on its maps. Its learned
+membership similarity is not geometric visibility and does not shield walls.
+
+* The latent prior of the seeded initial network is shown at once. Every
+  observation is conditioned on immediately. Optimization starts after
+  `min_distinct_locations` distinct locations (default 10). A click within
+  `distinct_location_separation` (default 0.05 m) of an already counted
+  location is a repeat and does not count. The first event runs
+  `initial_training_steps` Adam steps,
+  then `training_steps_per_event` steps after every `optimize_every`
+  observations. `optimize_parameters: false` freezes the parameters.
+* The status tooltip shows the phase (warm-up, training or frozen), events,
+  steps, the per-observation loss before and after the last event, and the
+  conditioning and optimization time of the last observation.
+* Undo, reset and load replay all observations including every optimization
+  event, so their cost grows with the session. The backend runs torch with
+  `torch_threads` threads (default 1; small matrices, where multi-threading
+  overhead dominates) and restores torch's thread count afterwards.
+* A rejected observation (failed factorization, non-finite loss or
+  gradient, or another torch error during training) marks the backend
+  **STOPPED**; its previous state is kept. Undo the observation to recover.
+
+Compare it with the baseline GP, without sourcing ROS, from the workspace
+root:
+
+```bash
+env -u PYTHONPATH -u AMENT_PREFIX_PATH \
+  PYTHONPATH=src/scalar_field_belief:src/scalar_field_belief/tools/belief_playground:src/scalar_field_sim \
+  python3 -m belief_playground --scenario 01_single_wall --backends gp,gp_attentive
+```
+
+`belief_playground.attentive_diagnostics` is a headless numerical check (no
+Qt). It covers:
+
+* the kernel: structure, PSD with duplicate inputs, diagonal semantics,
+  batching, reductions to stationary kernels, and parity with the author's
+  implementation;
+* the belief: units and transforms against dense Gaussian oracles, repeated
+  observations, the warm-up/cadence schedule and learning, failure
+  rollback, query side effects, and reset/replay;
+* import hygiene without the GMRF module and visGP;
+* one ordinary Session with `gp`, `gp_attentive` and `visgp`. Its
+  reconstruction quality is reported, not judged.
+
+`--author-demo` takes the author's `demo/main.py` (revision `1ccb7255`).
+Its sha256 is checked first; a different file is reported as not run. The
+kernel definitions are then extracted with `ast`, and only those
+definitions are executed. Without `--author-demo` the parity check is not
+run. Exit codes are as for `visgp_diagnostics`: 0 all
+passed, 1 failed, 3 some not run, 2 usage. Output goes to
+`./belief_playground_sessions/attentive_diagnostics/<UTC time>/` (or
+`--out-dir`): `report.md`, `report.json`, `arrays.npz` and the session.
+
+```bash
+env -u PYTHONPATH -u AMENT_PREFIX_PATH \
+  PYTHONPATH=src/scalar_field_belief:src/scalar_field_belief/tools/belief_playground:src/scalar_field_sim \
+  python3 -m belief_playground.attentive_diagnostics [--out-dir DIR] \
+  [--author-demo PATH/demo/main.py] [--gp-attentive-config YAML] \
+  [--scenario 01_single_wall]
+```
 
 ## Live viewer
 
@@ -564,6 +652,12 @@ random namespace. GMRF binding tests: see `gmrf/README.md`.
   converge within `covsel_max_iterations` or has more than `max_cliques`
   cliques; a grid larger than `max_reference_nodes` is reported as a
   `ValueError` with its size.
+* `unknown backend 'gp_attentive'` or a missing
+  `belief_params_attentive.yaml` with `ros2 run`: the installed package
+  predates the Attentive Kernel GP; rebuild the workspace so that
+  `scalar_field_belief.attentive` and the config are installed.
+* GP Attentive Kernel **STOPPED** at observation #k: a numerical failure
+  (`AttentiveGPError`, named in the status tooltip). Undo it.
 * `unknown scenario`: see `--list-scenarios`. Rebuild `scalar_field_sim` after
   adding scenarios, or pass a TOML path.
 * GP panels stay grey with *waiting*: the GP has not reached its first
@@ -572,6 +666,10 @@ random namespace. GMRF binding tests: see `gmrf/README.md`.
   represent (hidden from all four grid corners by walls, or on inactive
   nodes). The GP continues. Undo that observation (or Reset) to replay and
   recover.
-* With very few observations the GP's standard deviation can be much larger
-  than the GMRF's (target standardisation). It then dominates the shared std
-  range; use `--std-max` to compare details.
+* With `target_transform_mode: standardize` and very few observations, the
+  GP's standard deviation can be much larger than the GMRF's (the empirical
+  scale of a few values sets the prior scale; a single value gives scale 1).
+  It then dominates the shared std range; use `--std-max` to compare
+  details. The default `fixed` transform gives a prior std of
+  `sqrt(init_outputscale) * target_scale` (0.01 units with the shipped
+  values, the same as the GMRF's `prior_sigma`).

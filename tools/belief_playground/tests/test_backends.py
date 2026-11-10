@@ -17,6 +17,8 @@
 
 from __future__ import annotations
 
+import re
+
 import numpy as np
 import pytest
 from belief_playground.backends import (
@@ -25,6 +27,7 @@ from belief_playground.backends import (
     GmrfAdapter,
     GPAdapter,
     NotReadyError,
+    load_ros_params,
     make_backends,
 )
 from belief_playground.scenario import Scenario, make_display_grid
@@ -95,6 +98,116 @@ def test_gp_wall_aware_backend_rejects_a_baseline_config(single_wall_path):
     )
     reason = backends['gp_wall_aware'].unavailable_reason
     assert reason.startswith('ValueError') and 'wall_aware' in reason
+
+
+TARGET_KEYS = ('target_transform_mode', 'target_offset', 'target_scale')
+
+
+def _target_settings(params: dict) -> dict:
+    """Target transform settings of a parameter dict."""
+    return {key: params[key] for key in TARGET_KEYS}
+
+
+def _gp_yaml(tmp_path, **literals):
+    """Write the default GP YAML with `name: literal` replacing each named
+    parameter line (comments and other parameters unchanged)."""
+    text = DEFAULT_GP_CONFIG.read_text()
+    for name, literal in literals.items():
+        text, count = re.subn(
+            rf'^(\s*{name}:)[^\n]*$', rf'\g<1> {literal}', text, flags=re.M
+        )
+        assert count == 1, name
+    path = tmp_path / 'gp.yaml'
+    path.write_text(text)
+    return path
+
+
+def test_gp_yaml_standardize_mode_reaches_the_belief(
+    tmp_path, offset_scenario_path
+):
+    domain = Scenario(offset_scenario_path).domain
+    path = _gp_yaml(tmp_path, target_transform_mode='standardize')
+    gp = GPAdapter(domain, path)
+    assert gp.belief.config.target_transform_mode == 'standardize'
+    effective = gp.effective_config()['effective']
+    assert effective['target_transform_mode'] == 'standardize'
+    assert gp.belief.target_transform_info() == {
+        'mode': 'standardize',
+        'offset': None,
+        'scale': None,
+    }
+    values = np.array([2.0, 1.0, 1.6])
+    positions = [(-1.0, 3.0), (0.5, 2.5), (-2.0, 2.2)]
+    for (x, y), value in zip(positions, values, strict=True):
+        gp.add_measurement(x, y, value)
+    info = gp.belief.target_transform_info()
+    assert info['mode'] == 'standardize'
+    assert info['offset'] == pytest.approx(values.mean(), rel=1e-12)
+    assert info['scale'] == pytest.approx(values.std(), rel=1e-12)
+
+
+@pytest.mark.parametrize(
+    'offset_literal, scale_literal, offset, scale',
+    [('0.5', '1e-3', 0.5, 1e-3), ('-2e-1', '0.25', -0.2, 0.25)],
+    ids=['scale_exponent', 'offset_exponent'],
+)
+def test_gp_yaml_fixed_offset_and_scale_reach_the_belief(
+    tmp_path, offset_scenario_path, offset_literal, scale_literal, offset, scale
+):
+    path = _gp_yaml(
+        tmp_path,
+        target_transform_mode='fixed',
+        target_offset=offset_literal,
+        target_scale=scale_literal,
+        optimize_hyperparameters='false',
+    )
+    params, _ = load_ros_params(path)
+    # PyYAML (YAML 1.1) reads exponent literals without a '.' as strings.
+    for name, literal in (
+        ('target_offset', offset_literal),
+        ('target_scale', scale_literal),
+    ):
+        assert isinstance(params[name], str) == ('.' not in literal)
+
+    domain = Scenario(offset_scenario_path).domain
+    gp = GPAdapter(domain, path)
+    expected = {'mode': 'fixed', 'offset': offset, 'scale': scale}
+    assert gp.belief.target_transform_info() == expected
+    effective = gp.effective_config()['effective']
+    assert _target_settings(effective) == {
+        'target_transform_mode': 'fixed',
+        'target_offset': offset,
+        'target_scale': scale,
+    }
+    assert type(effective['target_offset']) is float
+    assert type(effective['target_scale']) is float
+
+    values = offset + scale * np.array([1.2, -0.5])
+    gp.add_measurement(-1.0, 3.0, values[0])
+    gp.add_measurement(0.5, 2.5, values[1])
+    assert gp.is_ready()
+    assert gp.belief.target_transform_info() == expected
+    np.testing.assert_allclose(
+        gp.belief.model.train_targets.numpy(), [1.2, -0.5], rtol=1e-9
+    )
+    # Hyperparameters are not optimised: physical noise = init_noise * scale**2
+    # (float32 likelihood noise).
+    assert gp.belief.measurement_noise_variance() == pytest.approx(
+        params['init_noise'] * scale**2, rel=1e-6
+    )
+
+
+@pytest.mark.parametrize('scale_literal', ['0.0', '-0.01', '-1e-3', '.nan'])
+def test_gp_yaml_invalid_fixed_target_scale_is_rejected(
+    tmp_path, offset_scenario_path, scale_literal
+):
+    domain = Scenario(offset_scenario_path).domain
+    path = _gp_yaml(tmp_path, target_scale=scale_literal)
+    with pytest.raises(ValueError, match='target_scale'):
+        GPAdapter(domain, path)
+    backend = make_backends(['gp'], domain, gp_config=path)['gp']
+    reason = backend.unavailable_reason
+    assert reason.startswith('ValueError') and 'target_scale' in reason
 
 
 def test_gmrf_adapter_prior_shapes_and_units(offset_scenario_path):

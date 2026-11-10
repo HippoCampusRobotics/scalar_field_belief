@@ -68,8 +68,9 @@ class ScalarFieldBelief:
     """Simple exact-GP belief over a 2D scalar field.
 
     The belief stores all measurements in physical coordinates, normalizes
-    inputs before passing them to the GP, and standardizes targets
-    during model fitting.
+    inputs before passing them to the GP, and transforms targets with the
+    configured target transform (fixed offset and scale, or standardization
+    re-estimated from the measurements) during model fitting.
 
     Parameters
     ----------
@@ -96,10 +97,11 @@ class ScalarFieldBelief:
     Inputs are always represented in physical coordinates `(x, y)` at the public
     API boundary of this class.
 
-    Internally, the GP operates on normalized inputs and standardized target
-    values. In wall-aware mode, one dimensionless wall feature per wall,
-    computed from the physical coordinates, is appended to the normalized
-    inputs. Query results are transformed back to original measurement units.
+    Internally, the GP operates on normalized inputs and transformed target
+    values `y_t = (y - offset) / scale`. In wall-aware mode, one
+    dimensionless wall feature per wall, computed from the physical
+    coordinates, is appended to the normalized inputs. Query results are
+    transformed back to original measurement units.
 
     The query method returns the latent GP posterior mean and variance.
     """
@@ -173,7 +175,9 @@ class ScalarFieldBelief:
 
         After reset, the belief has no fitted model. A query will fail until
         enough measurements have been added to trigger the first refit. The
-        configured wall geometry and wall feature map are kept.
+        configured wall geometry and wall feature map are kept. A fixed
+        target transform keeps its configured offset and scale; in
+        standardize mode the transform is unset until the next fit.
         """
         self.xy_train_phys = np.empty((0, 2), dtype=float)
         self.y_train = np.empty((0,), dtype=float)
@@ -181,6 +185,13 @@ class ScalarFieldBelief:
         self.model: ExactFieldGP | None = None
         self.likelihood: gpytorch.likelihoods.GaussianLikelihood | None = None
         self.standardizer: TargetStandardizer | None = None
+        if self.config.target_transform_mode == 'fixed':
+            self.standardizer = TargetStandardizer.fixed(
+                self.config.target_offset,
+                self.config.target_scale,
+                dtype=self.config.dtype,
+                device=self.config.device,
+            )
 
     def add_measurement(self, x: float, y: float, value: float) -> FitResult:
         """Add one scalar measurement and refit if required/according to
@@ -255,6 +266,33 @@ class ScalarFieldBelief:
             and self.standardizer is not None
         )
 
+    def target_transform_info(self) -> dict[str, str | float | None]:
+        """Return the current target transform `y_t = (y - offset) / scale`.
+
+        Returns
+        -------
+        dict
+            `{'mode': str, 'offset': float | None, 'scale': float | None}`
+            with offset and scale in measurement units. In fixed mode these
+            are always the configured values. In standardize mode they are
+            the values of the most recent fit or conditioning update, and
+            `None` before the first fit and after `reset()`.
+        """
+        mode = self.config.target_transform_mode
+        if mode == 'fixed':
+            return {
+                'mode': mode,
+                'offset': float(self.config.target_offset),
+                'scale': float(self.config.target_scale),
+            }
+        if self.standardizer is None:
+            return {'mode': mode, 'offset': None, 'scale': None}
+        return {
+            'mode': mode,
+            'offset': float(self.standardizer.mean),
+            'scale': float(self.standardizer.std),
+        }
+
     def query(self, xy_phys: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Query latent posterior mean and variance at physical positions.
 
@@ -281,7 +319,7 @@ class ScalarFieldBelief:
         Notes
         -----
         This method does not refit the model and does not update the target
-        standardizer. It only evaluates the currently fitted belief state.
+        transform. It only evaluates the currently fitted belief state.
         """
         if not self.has_model():
             raise RuntimeError('Belief has no fitted model yet.')
@@ -365,7 +403,7 @@ class ScalarFieldBelief:
             mean_norm = posterior.mean
             covar_norm = posterior.covariance_matrix
 
-        mean = mean_norm * self.standardizer.std + self.standardizer.mean
+        mean = self.standardizer.inverse_transform_mean(mean_norm)
         covar = self.standardizer.inverse_transform_covar(covar_norm)
         return mean.detach().cpu().numpy(), covar.detach().cpu().numpy()
 
@@ -385,13 +423,13 @@ class ScalarFieldBelief:
         assert self.standardizer is not None
 
         noise_norm = self.likelihood.noise.detach()
-        return float((noise_norm * self.standardizer.std**2).item())
+        return float((noise_norm * self.standardizer.variance_scale()).item())
 
     def fitted_hyperparameters_physical(self) -> dict[str, float]:
         """Return the currently fitted GP kernel hyperparameters in physical
         units: lengthscale_x_m/lengthscale_y_m (meters, via the domain
-        extent), outputscale (measurement units squared, via
-        standardizer.std**2 - same convention as measurement_noise_variance()),
+        extent), outputscale (measurement units squared, via the squared
+        target scale - same convention as measurement_noise_variance()),
         and noise_variance (measurement units squared).
 
         In wall-aware mode, the dictionary additionally contains
@@ -413,12 +451,12 @@ class ScalarFieldBelief:
         lengthscale_norm = spatial_kernel.lengthscale.detach()
         x_extent = self.normalizer.x_max - self.normalizer.x_min
         y_extent = self.normalizer.y_max - self.normalizer.y_min
-        std2 = float(self.standardizer.std**2)
+        scale2 = float(self.standardizer.variance_scale())
         hyperparameters = {
             'lengthscale_x_m': float(lengthscale_norm[0, 0]) * x_extent,
             'lengthscale_y_m': float(lengthscale_norm[0, 1]) * y_extent,
             'outputscale': float(self.model.covar_module.outputscale.detach())
-            * std2,
+            * scale2,
             'noise_variance': self.measurement_noise_variance(),
         }
 
@@ -433,17 +471,17 @@ class ScalarFieldBelief:
         """Update the current model's conditioning set from all stored measurements.
 
         Unlike `_fit_model`, this does not rebuild the model and does not
-        touch kernel or likelihood hyperparameters. It does recompute the
-        target standardizer from all current measurements (a cheap mean/std
-        recompute, not a gradient-based operation): freezing the
-        standardizer between refits previously caused a severe scale
-        mismatch once the model's fixed `init_outputscale`/`init_noise`
-        (defined in standardized target units) were interpreted against a
-        stale standardizer fit from very few points. Recomputing it here on
-        every measurement, while leaving kernel hyperparameters untouched,
-        keeps posterior queries reflecting every measurement between
-        refits, while `refit_policy`/`refit_every_k` continue to control
-        only the (expensive) hyperparameter re-optimization cadence.
+        touch kernel or likelihood hyperparameters. In standardize mode it
+        does recompute the target standardizer from all current
+        measurements (a cheap mean/std recompute, not a gradient-based
+        operation): freezing the standardizer between refits previously
+        caused a severe scale mismatch once the model's fixed
+        `init_outputscale`/`init_noise` (defined in transformed target
+        units) were interpreted against a stale standardizer fit from very
+        few points. In fixed mode the target transform is constant. Either
+        way, posterior queries reflect every measurement between refits,
+        while `refit_policy`/`refit_every_k` continue to control only the
+        (expensive) hyperparameter re-optimization cadence.
         """
         assert self.model is not None
 
@@ -514,11 +552,12 @@ class ScalarFieldBelief:
         self.likelihood = likelihood
 
     def _build_train_tensors(self) -> tuple[torch.Tensor, torch.Tensor]:
-        """Build GP training inputs and standardized training targets.
+        """Build GP training inputs and transformed training targets.
 
-        This method is used by both `_fit_model` and `_condition_on_data`. It
-        also updates `self.standardizer`, because target standardization is
-        recomputed from all current measurements every time this is called.
+        This method is used by both `_fit_model` and `_condition_on_data`. In
+        standardize mode it also updates `self.standardizer`, because the
+        standardization is recomputed from all current measurements every
+        time this is called. In fixed mode the configured transform is used.
         """
         if len(self.y_train) == 0:
             raise RuntimeError('Cannot build tensors without training data.')
@@ -529,7 +568,9 @@ class ScalarFieldBelief:
             dtype=self.config.dtype,
             device=self.config.device,
         )
-        self.standardizer = TargetStandardizer.fit(y_train_tensor)
+        if self.config.target_transform_mode == 'standardize':
+            self.standardizer = TargetStandardizer.fit(y_train_tensor)
+        assert self.standardizer is not None
         train_y = self.standardizer.transform(y_train_tensor)
 
         return train_x, train_y

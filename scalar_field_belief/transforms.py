@@ -23,13 +23,16 @@ There are two separate transformations:
    Physical `(x, y)` positions are mapped to normalized GP input coordinates
    using fixed physical domain bounds from the configuration.
 
-2. Target standardization
-   Scalar measurement values are standardized using the mean and standard
-   deviation of the current training targets.
+2. Target transform
+   Scalar measurement values are mapped to GP targets with
+   `y_t = (y - offset) / scale`. In fixed mode, offset and scale are
+   configured constants. In standardize mode, they are the mean and
+   standard deviation of the current training targets.
 
 This distinction is important:
 - input normalization depends on known physical bounds,
-- target standardization depends on observed measurement values.
+- the target transform is either fixed by the configuration or estimated
+  from the observed measurement values.
 
 `build_gp_inputs` is the single preparation path for training and query
 inputs. It combines the normalized coordinates with optional wall features,
@@ -52,23 +55,30 @@ if TYPE_CHECKING:
 
 @dataclass
 class TargetStandardizer:
-    """Standardize scalar target values for GP training.
+    """Affine transform of scalar target values for GP training.
 
-    The standardizer stores the mean and standard deviation of the training
-    targets. It is fitted during model fitting and then reused during querying
-    to convert posterior mean and variance back to original measurement units.
+    Targets are transformed as `y_t = (y - mean) / std`. The same parameters
+    convert posterior means (`mean + std * m_t`) and variances or
+    covariances (`std**2 * v_t`) back to original measurement units.
+
+    In standardize mode, the parameters are the mean and standard deviation
+    of the training targets (`fit`), recomputed whenever the training data
+    changes. In fixed mode, they are the configured target offset and scale
+    (`fixed`) and stay constant.
 
     Parameters
     ----------
     mean
-        Mean of the training targets.
+        Target offset in measurement units: the mean of the training
+        targets, or the configured offset.
     std
-        Standard deviation of the training targets.
+        Target scale in measurement units: the standard deviation of the
+        training targets, or the configured scale.
 
     Notes
     -----
     The stored tensors are detached from the computation graph because the
-    standardization parameters are preprocessing state, not learnable model
+    transform parameters are preprocessing state, not learnable model
     parameters.
     """
 
@@ -116,21 +126,58 @@ class TargetStandardizer:
         std = torch.where(std < eps, torch.ones_like(std), std)
         return cls(mean=mean.detach(), std=std.detach())
 
+    @classmethod
+    def fixed(
+        cls,
+        offset: float,
+        scale: float,
+        *,
+        dtype: torch.dtype,
+        device: str | torch.device,
+    ) -> TargetStandardizer:
+        """Build a transform with a constant offset and scale.
+
+        Parameters
+        ----------
+        offset
+            Target offset in measurement units.
+        scale
+            Target scale in measurement units. Must be positive.
+        dtype, device
+            Dtype and device of the stored zero-dimensional tensors.
+        """
+        return cls(
+            mean=torch.tensor(offset, dtype=dtype, device=device),
+            std=torch.tensor(scale, dtype=dtype, device=device),
+        )
+
     def transform(self, y: torch.Tensor) -> torch.Tensor:
         return (y - self.mean) / self.std
+
+    def variance_scale(self) -> torch.Tensor:
+        """Return the factor `std**2` from transformed to physical variance."""
+        return self.std**2
+
+    def inverse_transform_mean(self, mean_norm: torch.Tensor) -> torch.Tensor:
+        return mean_norm * self.std + self.mean
+
+    def inverse_transform_variance(
+        self, var_norm: torch.Tensor
+    ) -> torch.Tensor:
+        return var_norm * self.variance_scale()
 
     def inverse_transform_mean_var(
         self, mean_norm: torch.Tensor, var_norm: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        mean = mean_norm * self.std + self.mean
-        var = var_norm * (self.std**2)
+        mean = self.inverse_transform_mean(mean_norm)
+        var = self.inverse_transform_variance(var_norm)
         return mean, var
 
     def inverse_transform_covar(self, covar_norm: torch.Tensor) -> torch.Tensor:
-        # Same rescaling as inverse_transform_mean_var, applied to the whole
-        # matrix: y_std = (y - mean) / std, so Cov(y) = Cov(y_std) * std**2
-        # for every entry, not just the diagonal.
-        return covar_norm * (self.std**2)
+        # Same rescaling as inverse_transform_variance, applied to the whole
+        # matrix: y_t = (y - mean) / std, so Cov(y) = Cov(y_t) * std**2 for
+        # every entry, not just the diagonal.
+        return covar_norm * self.variance_scale()
 
 
 @dataclass(frozen=True)

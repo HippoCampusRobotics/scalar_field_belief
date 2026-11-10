@@ -16,7 +16,8 @@
 """Configuration object for the scalar field belief node.
 
 The `BeliefConfig` dataclass collects all parameters that affect the GP belief
-model, input normalization, refitting behavior, and visualization grid.
+model, input normalization, target transform, refitting behavior, and
+visualization grid.
 
 The ROS node is responsible for reading parameters from ROS and constructing a
 `BeliefConfig`. The core belief code then uses this plain Python object without
@@ -26,9 +27,12 @@ depending on ROS parameter APIs.
 from __future__ import annotations
 
 import math
+import numbers
 from dataclasses import KW_ONLY, dataclass
 
 import torch
+
+TARGET_TRANSFORM_MODES = ('standardize', 'fixed')
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,10 +63,10 @@ class BeliefConfig:
         Initial ARD kernel lengthscales in normalized input units.
 
     init_outputscale
-        Initial kernel outputscale in standardized target units.
+        Initial kernel outputscale in transformed target units.
 
     init_noise
-        Initial Gaussian likelihood noise in standardized target units.
+        Initial Gaussian likelihood noise in transformed target units.
 
     refit_policy
         Policy that decides when the GP is refitted. Supported values are
@@ -102,8 +106,8 @@ class BeliefConfig:
         GP input/kernel variant. `'baseline'` (default) uses only the
         normalized `(x, y)` inputs. `'wall_aware'` appends one smooth feature
         per wall segment and multiplies the spatial kernel by an RBF kernel
-        over these features; it requires a wall geometry. This and the
-        following wall settings are keyword-only.
+        over these features; it requires a wall geometry. This and all
+        following settings are keyword-only.
 
     wall_beta
         Fixed wall-feature sharpness in 1/m. Only used in wall-aware mode.
@@ -115,6 +119,27 @@ class BeliefConfig:
         Initial ARD lengthscale of every wall feature. The features are
         dimensionless, so this value is dimensionless as well. Only used in
         wall-aware mode.
+
+    target_transform_mode
+        Transform applied to measurement values `y` before GP fitting,
+        `y_t = (y - offset) / scale`. Supported values are `'fixed'`
+        (default) and `'standardize'`. `'fixed'` uses `target_offset` and
+        `target_scale` for the lifetime of the belief, including resets.
+        `'standardize'` re-estimates offset and scale as the mean and
+        population standard deviation of all stored measurements whenever
+        the GP is refitted or conditioned on new data (a standard deviation
+        below 1e-12 is replaced by one); `target_offset` and `target_scale`
+        are then ignored.
+
+    target_offset
+        Target offset in measurement units. Only used in fixed mode.
+
+    target_scale
+        Target scale in measurement units, must be positive. Only used in
+        fixed mode. Since `init_outputscale` and `init_noise` are in
+        transformed units, the physical prior variance is
+        `init_outputscale * target_scale**2` and the physical noise variance
+        is `init_noise * target_scale**2` (measurement units squared).
 
     Notes
     -----
@@ -157,6 +182,9 @@ class BeliefConfig:
     wall_beta: float = 1.0
     wall_rho: float = 0.35
     init_wall_lengthscale: float = 1.0
+    target_transform_mode: str = 'fixed'
+    target_offset: float = 0.0
+    target_scale: float = 0.01
 
     @property
     def x_range(self) -> tuple[float, float]:
@@ -224,3 +252,31 @@ class BeliefConfig:
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0.0:
                 raise ValueError(f'{name} must be positive and finite.')
+
+        if (
+            not isinstance(self.target_transform_mode, str)
+            or self.target_transform_mode not in TARGET_TRANSFORM_MODES
+        ):
+            raise ValueError(
+                'Unsupported target_transform_mode '
+                f'{self.target_transform_mode!r}. '
+                f'Expected one of {TARGET_TRANSFORM_MODES}.'
+            )
+        # Offset and scale are ignored in standardize mode, so they are only
+        # checked in fixed mode.
+        if self.target_transform_mode == 'fixed':
+            if not _is_finite_real(self.target_offset):
+                raise ValueError('target_offset must be a finite number.')
+            if not _is_finite_real(self.target_scale) or self.target_scale <= 0:
+                raise ValueError(
+                    'target_scale must be a positive, finite number.'
+                )
+
+
+def _is_finite_real(value: object) -> bool:
+    """Return whether `value` is a finite real number (bool excluded)."""
+    return (
+        isinstance(value, numbers.Real)
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )

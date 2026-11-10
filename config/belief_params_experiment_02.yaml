@@ -23,6 +23,7 @@
     init_lengthscale_y: 0.045
     init_outputscale: 1.0
     init_noise: 0.01
+    target_transform_mode: standardize
 
     refit_policy: every_k_measurements
     # Unlike belief_params_default.yaml, this belief keeps re-fitting its

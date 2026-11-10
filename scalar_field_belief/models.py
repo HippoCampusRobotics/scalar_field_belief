@@ -20,7 +20,8 @@ helpers for constructing kernels and initializing hyperparameters.
 
 The surrounding belief code is responsible for:
 - converting physical positions to normalized inputs,
-- standardizing scalar measurement values,
+- transforming scalar measurement values (fixed offset and scale, or
+  standardization),
 - training the model,
 - converting predictions back to physical measurement units.
 
@@ -29,7 +30,8 @@ Conventions
 The GP in this module operates on preprocessed data:
 - input coordinates are normalized 2D positions, optionally followed by
   dimensionless wall features (wall-aware mode),
-- target values are standardized scalar measurements.
+- target values are transformed scalar measurements,
+  `y_t = (y - offset) / scale`.
 
 The belief's public API always takes physical `(N, 2)` positions. The model
 inputs are internal: `(N, 2)` normalized positions in baseline mode, and
@@ -39,7 +41,7 @@ wall-aware mode.
 Therefore:
 - spatial kernel lengthscales are expressed in normalized input units,
 - wall-feature lengthscales are dimensionless feature units,
-- outputscale and likelihood noise are expressed in standardized target units.
+- outputscale and likelihood noise are expressed in transformed target units.
 """
 
 from __future__ import annotations
@@ -63,7 +65,7 @@ class ExactFieldGP(gpytorch.models.ExactGP):
         baseline mode, or augmented inputs of shape `(N, 2 + M)` in
         wall-aware mode.
     train_y
-        Standardized scalar training targets of shape `(N,)`.
+        Transformed scalar training targets of shape `(N,)`.
     likelihood
         Gaussian likelihood used by the exact GP.
     covar_module
@@ -228,9 +230,9 @@ def initialize_model_hyperparameters(
         Initial ARD lengthscales of the spatial kernel for x and y. These are
         in normalized input units, not meters.
     init_outputscale
-        Initial kernel outputscale. This is in standardized target units.
+        Initial kernel outputscale. This is in transformed target units.
     init_noise
-        Initial Gaussian likelihood noise. This is also in standardized target
+        Initial Gaussian likelihood noise. This is also in transformed target
         units.
     init_wall_lengthscale
         Initial lengthscale assigned to every wall feature. Dimensionless.

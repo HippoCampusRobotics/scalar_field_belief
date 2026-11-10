@@ -23,9 +23,11 @@
     effective_config() -> dict     # snapshot for session metadata
 
 Attributes: `name` (CLI key), `label` (status text) and `display_name`
-(short panel title, e.g. "GP baseline"). Optional capability:
+(short panel title, e.g. "GP baseline"). Optional capabilities:
 `model_grid() -> ModelGridOverlay | None`, the model's own node graph for the
-estimate panel (GMRF: grid edges; visGP: visible reference lattice edges).
+estimate panel (GMRF: grid edges; visGP: visible reference lattice edges),
+and `status_lines() -> list[str]`, short training/fit status lines for the
+status tooltip (GP Attentive Kernel).
 
 Mean is the latent posterior mean in scenario measurement units, variance the
 latent marginal variance in units^2 (no unit conversion anywhere). Positions
@@ -35,7 +37,8 @@ are NaN.
 Each adapter reads its own existing ROS parameter YAML (`/**: ros__parameters:`)
 and keeps its own schema. The domain bounds are always replaced by the
 scenario bounds and the known walls always come from the scenario; both
-overrides are recorded in the snapshot.
+overrides are recorded in the snapshot. The GP Attentive Kernel receives no
+walls (positions and values only).
 """
 
 from __future__ import annotations
@@ -60,8 +63,11 @@ DEFAULT_GP_WALL_AWARE_CONFIG = (
 )
 DEFAULT_GMRF_CONFIG = REPO_ROOT / 'gmrf' / 'ros' / 'belief_params_gmrf.yaml'
 DEFAULT_VISGP_CONFIG = REPO_ROOT / 'config' / 'belief_params_visgp.yaml'
+DEFAULT_GP_ATTENTIVE_CONFIG = (
+    REPO_ROOT / 'config' / 'belief_params_attentive.yaml'
+)
 GMRF_MODULE_NAME = 'scalar_field_belief_gmrf_py'
-BACKEND_NAMES = ('gp', 'gp_wall_aware', 'gmrf', 'visgp')
+BACKEND_NAMES = ('gp', 'gp_wall_aware', 'gmrf', 'visgp', 'gp_attentive')
 
 
 class NotReadyError(RuntimeError):
@@ -169,6 +175,12 @@ def build_gp_config(params: dict, domain: Domain):
         raise ValueError(f'GP config is missing required parameters: {missing}')
     for name in ('training_iter', 'refit_every_k'):
         kwargs[name] = int(kwargs[name])
+    # PyYAML reads exponent literals without a decimal point (e.g. 1e-2) as
+    # strings, ROS parses them as doubles. Only the target transform values
+    # are converted here; other float parameters need a decimal point.
+    for name in ('target_offset', 'target_scale'):
+        if isinstance(kwargs.get(name), str):
+            kwargs[name] = float(kwargs[name])
     bounds = _bounds_override(params, domain)
     kwargs.update(bounds['used'])
     cfg = BeliefConfig(**kwargs)
@@ -679,6 +691,242 @@ class VisGPAdapter:
 
 
 # --------------------------------------------------------------------------
+# GP with the Attentive Kernel
+# --------------------------------------------------------------------------
+
+_NO_GEOMETRY = 'not used (the attentive kernel receives positions only)'
+# Parameters in the attentive-kernel YAML that the playground does not use.
+_GP_ATTENTIVE_UNUSED_KEYS = {
+    'frame_id': 'not used (single frame)',
+    'walls': _NO_GEOMETRY,
+    'belief_geometry': _NO_GEOMETRY,
+    'scenario_path': _NO_GEOMETRY,
+}
+
+
+def _gp_attentive_value(name: str, value, kind: str):
+    """YAML value as bool/int/float; numeric strings (PyYAML reads 1e-4
+    as a string) are converted."""
+    if kind == 'bool':
+        if not isinstance(value, bool):
+            raise ValueError(
+                f'GP attentive parameter {name} must be true or false: '
+                f'{value!r}'
+            )
+        return value
+    if kind == 'int' and isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise ValueError(
+            f'GP attentive parameter {name} must be a number: {value!r}'
+        )
+    try:
+        number = float(value)
+    except ValueError as exc:
+        raise ValueError(
+            f'GP attentive parameter {name} must be a number: {value!r}'
+        ) from exc
+    if kind == 'int':
+        if not number.is_integer():
+            raise ValueError(
+                f'GP attentive parameter {name} must be an integer: {value!r}'
+            )
+        return int(number)
+    return number
+
+
+def build_gp_attentive_config(params: dict, domain: Domain):
+    """Map attentive-kernel parameters to an AttentiveGPConfig (bounds from
+    the scenario; parameters absent from the file keep their defaults)."""
+    from scalar_field_belief.attentive import AttentiveGPConfig
+
+    fields = {f.name: f for f in dataclasses.fields(AttentiveGPConfig)}
+    kwargs = {
+        name: _gp_attentive_value(
+            name,
+            params[name],
+            f.type if isinstance(f.type, str) else f.type.__name__,
+        )
+        for name, f in fields.items()
+        if name in params
+    }
+    cfg = AttentiveGPConfig(**kwargs)
+    cfg.validate()
+    bounds = _bounds_override(params, domain)
+    unknown = sorted(
+        set(params)
+        - set(fields)
+        - set(_GP_ATTENTIVE_UNUSED_KEYS)
+        - {'x_min', 'x_max', 'y_min', 'y_max'}
+    )
+    snapshot = {
+        'effective': {
+            **bounds['used'],
+            **{name: getattr(cfg, name) for name in fields},
+        },
+        'defaults_used': sorted(set(fields) - set(params)),
+        'bounds_override': bounds,
+        'unused_parameters': {
+            k: reason
+            for k, reason in _GP_ATTENTIVE_UNUSED_KEYS.items()
+            if k in params
+        },
+        'unknown_parameters_ignored': unknown,
+    }
+    return cfg, snapshot
+
+
+class AttentiveGPAdapter:
+    """Adapter for scalar_field_belief.attentive.AttentiveGPBelief.
+
+    The belief gets the scenario bounds, positions and values only (no
+    walls, truth or sources). `effective_config()` and `status_lines()` may
+    be called from the GUI thread: they only read the snapshot that the
+    worker replaces after every reset, measurement and query.
+    """
+
+    name = 'gp_attentive'
+
+    def __init__(self, domain: Domain, config_path: str | Path | None = None):
+        from scalar_field_belief.attentive import AttentiveGPBelief
+
+        params, file_record = load_ros_params(
+            config_path or DEFAULT_GP_ATTENTIVE_CONFIG
+        )
+        cfg, snapshot = build_gp_attentive_config(params, domain)
+        t0 = time.perf_counter()
+        self.belief = AttentiveGPBelief(cfg, domain.x_range, domain.y_range)
+        construction_ms = (time.perf_counter() - t0) * 1e3
+        self.label = (
+            f'GP Attentive Kernel (M={cfg.num_components}, '
+            f'H={cfg.hidden_width}, seed {cfg.seed})'
+        )
+        self.display_name = 'GP Attentive Kernel'
+        self.unit = domain.unit
+        self._last_query = {'cells': 0, 'variance_clamps': 0}
+        self._snapshot = {
+            'backend': 'gp_attentive',
+            'implementation': 'scalar_field_belief.attentive.AttentiveGPBelief',
+            'config_file': file_record,
+            'effective': {
+                **snapshot['effective'],
+                'derived': self.belief.model_description(),
+            },
+            'defaults_used': snapshot['defaults_used'],
+            'bounds_override': snapshot['bounds_override'],
+            'unused_parameters': snapshot['unused_parameters'],
+            'unknown_parameters_ignored': snapshot[
+                'unknown_parameters_ignored'
+            ],
+            'walls_used': 'none: the attentive kernel receives positions and '
+            'values only (walls are drawn for display)',
+            'construction_ms': construction_ms,
+            'readiness': 'latent prior of the seeded initial model available '
+            'immediately',
+            'value_unit': domain.unit,
+        }
+        self._live = self._live_snapshot()
+
+    def _live_snapshot(self) -> tuple[dict, tuple[str, ...]]:
+        status = self.belief.status()
+        fitted = self.belief.fitted_summary()
+        live = {
+            'training_status': status,
+            'fitted_summary': fitted,
+            'last_query': dict(self._last_query),
+        }
+        return live, tuple(self._format_lines(status, fitted))
+
+    def _format_lines(self, status: dict, fitted: dict) -> list[str]:
+        u = self.unit
+        n = status['num_measurements']
+        distinct = status['num_distinct_locations']
+        phase = status['phase']
+        counts = f'{n} obs, {distinct} distinct locations'
+        if phase == 'frozen':
+            head = f'frozen (optimize_parameters: false); {counts}'
+        elif phase == 'warm-up':
+            head = (
+                f'warm-up: {distinct}/{status["min_distinct_locations"]} '
+                f'distinct locations before the first optimization; {n} obs'
+            )
+        else:
+            head = (
+                f'training: {status["optimization_events"]} events, '
+                f'{status["optimization_steps"]} Adam steps; {counts}'
+            )
+        lines = [f'AK {head}']
+        event = status['last_event']
+        if event is not None:
+            lines.append(
+                f'AK last event after obs #{event["measurement"]}: '
+                f'{event["steps"]} steps, loss {event["loss_before"]:.4g} -> '
+                f'{event["loss_after"]:.4g} (per obs), '
+                f'{event["optimization_ms"]:.0f} ms'
+            )
+        last = status['last_add']
+        if last is not None:
+            opt = last['optimization_ms']
+            lines.append(
+                f'AK last add: conditioning {last["conditioning_ms"]:.0f} ms'
+                + (f', optimization {opt:.0f} ms' if opt is not None else '')
+            )
+        change = fitted['network_change_relative']
+        lines.append(
+            f'AK amplitude std {fitted["amplitude_std"]:.3g} {u}, '
+            f'noise std {fitted["noise_std"]:.3g} {u}, '
+            f'mean {fitted["constant_mean"]:.3g} {u}'
+            + (f', network change {100 * change:.0f} %' if change else '')
+        )
+        if self._last_query['variance_clamps']:
+            lines.append(
+                f'AK {self._last_query["variance_clamps"]} roundoff-negative '
+                'variances set to 0 in the last grid query'
+            )
+        if status['last_rejected']:
+            lines.append(f'AK rejected {status["last_rejected"]}')
+        return lines
+
+    def reset(self) -> None:
+        self.belief.reset()
+        self._last_query = {'cells': 0, 'variance_clamps': 0}
+        self._live = self._live_snapshot()
+
+    def add_measurement(self, x: float, y: float, value: float) -> None:
+        try:
+            self.belief.add_measurement(float(x), float(y), float(value))
+        finally:
+            self._live = self._live_snapshot()
+
+    def is_ready(self) -> bool:
+        return True
+
+    def not_ready_reason(self) -> str:
+        return ''
+
+    def num_assimilated(self) -> int:
+        return int(self.belief.num_measurements)
+
+    def query(self, xy: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        prediction = self.belief.predict_marginal(np.asarray(xy, dtype=float))
+        self._last_query = {
+            'cells': int(prediction.mean.size),
+            'variance_clamps': prediction.variance_clamps,
+        }
+        self._live = self._live_snapshot()
+        return prediction.mean, prediction.variance
+
+    def status_lines(self) -> list[str]:
+        """Training phase, counts, last loss and timings (worker snapshot)."""
+        return list(self._live[1])
+
+    def effective_config(self) -> dict:
+        snapshot = copy.deepcopy(self._snapshot)
+        snapshot.update(copy.deepcopy(self._live[0]))
+        return snapshot
+
+
+# --------------------------------------------------------------------------
 
 
 class UnavailableBackend:
@@ -720,6 +968,7 @@ def make_backends(
     gmrf_module_dir: str | Path | None = None,
     gp_wall_aware_config: str | Path | None = None,
     visgp_config: str | Path | None = None,
+    gp_attentive_config: str | Path | None = None,
 ) -> dict:
     """Construct the selected adapters; failures become UnavailableBackend."""
     backends = {}
@@ -739,6 +988,8 @@ def make_backends(
                 )
             elif name == 'visgp':
                 backends[name] = VisGPAdapter(domain, visgp_config)
+            elif name == 'gp_attentive':
+                backends[name] = AttentiveGPAdapter(domain, gp_attentive_config)
             else:
                 backends[name] = GmrfAdapter(
                     domain, gmrf_config, gmrf_module_dir

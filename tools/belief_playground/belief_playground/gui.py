@@ -124,10 +124,10 @@ def colorize(
 TIMING_HELP = (
     'Timings: wall-clock time in the worker thread for the most recent job.\n'
     '  assimilate X ms: the job that added the newest observation.\n'
-    '    GP: store it (+ target standardisation) and, when refit_policy says\n'
-    '      so, hyperparameter training; otherwise only set_train_data. The GP\n'
-    '      posterior solve is NOT included (GPyTorch builds it lazily in the\n'
-    '      next query, so it counts as grid query).\n'
+    '    GP: store it (+ target offset/scale in standardize mode) and, when\n'
+    '      refit_policy says so, hyperparameter training; otherwise only\n'
+    '      set_train_data. The GP posterior solve is NOT included (GPyTorch\n'
+    '      builds it lazily in the next query, so it counts as grid query).\n'
     '    GMRF: add_measurement + sparse update() solve (posterior mean).\n'
     '  reset+replay K obs X ms: after Undo/Reset/Load, backend reset plus\n'
     '    re-assimilation of all K stored observations (same per-backend\n'
@@ -959,6 +959,8 @@ class PlaygroundWindow(QtWidgets.QMainWindow):
             hidden = getattr(backend, 'hidden_cells', 0)
             if st.mean is not None and hidden:
                 details.append(f'  {hidden} cells not representable (grey)')
+            status_lines = getattr(backend, 'status_lines', list)
+            details.extend(f'  {t}' for t in status_lines())
             if self._neg_var[name]:
                 details.append(
                     f'  WARNING: {self._neg_var[name]} cells with negative variance'
