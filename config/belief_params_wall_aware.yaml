@@ -21,6 +21,16 @@
     init_lengthscale_y: 0.045
     init_outputscale: 1.0
     init_noise: 0.01
+    # measurement values y are transformed before GP fitting:
+    # y_t = (y - target_offset) / target_scale. fixed keeps both values
+    # constant; standardize re-estimates them from the empirical mean/std of
+    # all measurements and ignores the two values below. init_outputscale and
+    # init_noise are in transformed units: physical prior variance =
+    # init_outputscale * target_scale^2 = 1e-4 units^2 (std 0.01), noise
+    # variance = init_noise * target_scale^2 = 1e-6 units^2 (std 1e-3)
+    target_transform_mode: fixed
+    target_offset: 0.0     # [units]
+    target_scale: 0.01     # [units], > 0
 
     refit_policy: every_k_measurements
     refit_every_k: 1

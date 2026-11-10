@@ -86,10 +86,12 @@ def measurements(n: int = 12, seed: int = 0):
     return xy, values
 
 
-def fitted_belief(variant: str, optimize: bool = False) -> ScalarFieldBelief:
+def fitted_belief(
+    variant: str, optimize: bool = False, **overrides
+) -> ScalarFieldBelief:
     torch.manual_seed(0)
     config = make_config(
-        model_variant=variant, optimize_hyperparameters=optimize
+        model_variant=variant, optimize_hyperparameters=optimize, **overrides
     )
     belief = ScalarFieldBelief(config, wall_geometry=GEOMETRY)
     for (x, y), value in zip(*measurements(), strict=True):
@@ -382,9 +384,36 @@ def test_reset_keeps_wall_geometry():
 
 # ------------------------------------------------- belief: posterior math
 
+# Target transform settings. 'fixed' uses the default offset 0.0 and scale
+# 0.01; 'fixed_offset' has a nonzero offset and a scale that differs from
+# both the default and the data std (~1e-3), so a dropped offset or a
+# default/empirical scale is detected as well.
+TRANSFORMS = {
+    'standardize': {'target_transform_mode': 'standardize'},
+    'fixed': {'target_transform_mode': 'fixed'},
+    'fixed_offset': {
+        'target_transform_mode': 'fixed',
+        'target_offset': 0.001,
+        'target_scale': 0.004,
+    },
+}
+
+
+def expected_transform(belief: ScalarFieldBelief) -> tuple[float, float]:
+    """Target offset and scale (measurement units) of the configured mode:
+    the configured values in fixed mode, the population mean and std of
+    the stored measurements in standardize mode."""
+    config = belief.config
+    if config.target_transform_mode == 'fixed':
+        return config.target_offset, config.target_scale
+    return belief.y_train.mean(), belief.y_train.std()
+
 
 def oracle_posterior(belief: ScalarFieldBelief, xq: np.ndarray):
-    """Exact GP posterior in NumPy, using the belief's hyperparameters."""
+    """Exact GP posterior in NumPy, using the belief's hyperparameters.
+
+    Returns the physical mean, marginal variance and full covariance at `xq`.
+    """
     model, likelihood = belief.model, belief.likelihood
     outputscale = model.covar_module.outputscale.item()
     spatial_ls = get_spatial_kernel(model.covar_module).lengthscale
@@ -410,31 +439,116 @@ def oracle_posterior(belief: ScalarFieldBelief, xq: np.ndarray):
         return k
 
     y = belief.y_train
-    mu, sd = y.mean(), y.std()
+    mu, sd = expected_transform(belief)
     train, query = inputs(belief.xy_train_phys), inputs(xq)
     A = kernel(train, train) + noise * np.eye(len(y))
     Ks = kernel(train, query)
     mean = const + Ks.T @ np.linalg.solve(A, (y - mu) / sd - const)
-    var = outputscale - np.sum(Ks * np.linalg.solve(A, Ks), axis=0)
-    return mu + sd * mean, sd**2 * var
+    A_inv_Ks = np.linalg.solve(A, Ks)
+    var = outputscale - np.sum(Ks * A_inv_Ks, axis=0)
+    cov = kernel(query, query) - Ks.T @ A_inv_Ks
+    return mu + sd * mean, sd**2 * var, sd**2 * cov
 
 
-@pytest.mark.parametrize('optimize', [False, True], ids=['fixed', 'fitted'])
-@pytest.mark.parametrize('variant', ['baseline', 'wall_aware'])
-def test_posterior_matches_exact_gp(variant, optimize):
-    belief = fitted_belief(variant, optimize)
-    xq = np.random.default_rng(3).uniform((0, 0), (2, 4), size=(20, 2))
+def assert_matches_oracle(belief: ScalarFieldBelief, xq: np.ndarray) -> None:
+    """Mean, variance, covariance and noise/outputscale in physical units."""
     mean, var = belief.query(xq)
-    mean_ref, var_ref = oracle_posterior(belief, xq)
-    scale = belief.y_train.std()
+    cmean, cov = belief.query_with_covariance(xq)
+    mean_ref, var_ref, cov_ref = oracle_posterior(belief, xq)
+    scale = belief.target_transform_info()['scale']
     np.testing.assert_allclose(mean, mean_ref, rtol=1e-6, atol=1e-6 * scale)
+    np.testing.assert_allclose(cmean, mean_ref, rtol=1e-6, atol=1e-6 * scale)
     np.testing.assert_allclose(var, var_ref, rtol=1e-5, atol=1e-6 * scale**2)
+    np.testing.assert_allclose(cov, cov_ref, rtol=1e-5, atol=1e-6 * scale**2)
     assert np.all(var > 0)
 
+    _, scale_ref = expected_transform(belief)
+    outputscale_t = belief.model.covar_module.outputscale.item()
+    noise_t = belief.likelihood.noise.item()
+    # The noise product is computed in float32 (float32 likelihood noise).
+    assert belief.measurement_noise_variance() == pytest.approx(
+        noise_t * scale_ref**2, rel=1e-6
+    )
+    hyper = belief.fitted_hyperparameters_physical()
+    assert hyper['outputscale'] == pytest.approx(
+        outputscale_t * scale_ref**2, rel=1e-9
+    )
+    assert hyper['noise_variance'] == belief.measurement_noise_variance()
 
+
+@pytest.mark.parametrize('transform', list(TRANSFORMS))
+@pytest.mark.parametrize('optimize', [False, True], ids=['fixed', 'fitted'])
 @pytest.mark.parametrize('variant', ['baseline', 'wall_aware'])
-def test_query_with_covariance_consistent(variant):
-    belief = fitted_belief(variant)
+def test_posterior_matches_exact_gp(variant, optimize, transform):
+    belief = fitted_belief(variant, optimize, **TRANSFORMS[transform])
+    mode = TRANSFORMS[transform]['target_transform_mode']
+    assert belief.config.target_transform_mode == mode
+    xq = np.random.default_rng(3).uniform((0, 0), (2, 4), size=(20, 2))
+    assert_matches_oracle(belief, xq)
+
+
+@pytest.mark.parametrize('transform', list(TRANSFORMS))
+def test_wall_aware_transform_through_refits_and_reset(transform):
+    """Refits every third measurement with hyperparameter optimisation,
+    conditioning in between, and a reset after ten measurements. A fixed
+    transform stays at its configured values throughout; a standardize
+    transform follows the stored measurements and is unset after reset."""
+    torch.manual_seed(0)
+    config = make_config(
+        model_variant='wall_aware',
+        optimize_hyperparameters=True,
+        refit_policy='every_k_measurements',
+        refit_every_k=3,
+        **TRANSFORMS[transform],
+    )
+    belief = ScalarFieldBelief(config, wall_geometry=GEOMETRY)
+    fixed = config.target_transform_mode == 'fixed'
+    if fixed:
+        initial = {
+            'mode': 'fixed',
+            'offset': config.target_offset,
+            'scale': config.target_scale,
+        }
+    else:
+        initial = {'mode': 'standardize', 'offset': None, 'scale': None}
+    assert belief.target_transform_info() == initial
+
+    xy, values = measurements(n=16, seed=4)
+    xq = np.random.default_rng(5).uniform((0, 0), (2, 4), size=(8, 2))
+    n_before_reset = 10
+    did_refit = []
+    for i in range(len(values)):
+        if i == n_before_reset:
+            belief.reset()
+            assert not belief.has_model()
+            assert belief.wall_feature_dim == 2
+            assert belief.target_transform_info() == initial
+        start = 0 if i < n_before_reset else n_before_reset
+        result = belief.add_measurement(*xy[i], values[i])
+        did_refit.append(result.did_refit)
+        np.testing.assert_array_equal(belief.y_train, values[start : i + 1])
+        if not belief.has_model():
+            assert belief.target_transform_info() == initial
+            continue
+        info = belief.target_transform_info()
+        if fixed:
+            assert info == initial
+        else:
+            stored = values[start : i + 1]
+            assert info['mode'] == 'standardize'
+            assert info['offset'] == pytest.approx(stored.mean(), rel=1e-12)
+            assert info['scale'] == pytest.approx(stored.std(), rel=1e-12)
+        assert_matches_oracle(belief, xq)
+    expected_refits = [(i + 1) % 3 == 0 for i in range(n_before_reset)] + [
+        (i + 1) % 3 == 0 for i in range(len(values) - n_before_reset)
+    ]
+    assert did_refit == expected_refits
+
+
+@pytest.mark.parametrize('mode', ['standardize', 'fixed'])
+@pytest.mark.parametrize('variant', ['baseline', 'wall_aware'])
+def test_query_with_covariance_consistent(variant, mode):
+    belief = fitted_belief(variant, target_transform_mode=mode)
     xq = np.array([[0.5, 1.0], [0.9, 2.0], [1.1, 2.0], [1.5, 3.0]])
     mean, var = belief.query(xq)
     cmean, cov = belief.query_with_covariance(xq)

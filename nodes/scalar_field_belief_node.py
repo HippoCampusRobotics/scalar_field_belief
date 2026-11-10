@@ -134,6 +134,19 @@ class ScalarFieldBeliefNode(Node):
             raise
         self.config = config
 
+        transform = self.belief.target_transform_info()
+        if transform['mode'] == 'fixed':
+            transform_details = (
+                f'offset={transform["offset"]}, scale={transform["scale"]} '
+                '(measurement units)'
+            )
+        else:
+            transform_details = 'offset and scale re-estimated from the data'
+        self.get_logger().info(
+            'Target transform y_t = (y - offset) / scale: '
+            f'{transform["mode"]}, {transform_details}.'
+        )
+
         self._field_color_min = (
             self.get_parameter('field_color_min')
             .get_parameter_value()
@@ -223,6 +236,11 @@ class ScalarFieldBeliefNode(Node):
             'init_outputscale', 1.0, self._static_descriptor()
         )
         self.declare_parameter('init_noise', 0.05, self._static_descriptor())
+        self.declare_parameter(
+            'target_transform_mode', 'fixed', self._static_descriptor()
+        )
+        self.declare_parameter('target_offset', 0.0, self._static_descriptor())
+        self.declare_parameter('target_scale', 0.01, self._static_descriptor())
         self.declare_parameter(
             'refit_policy', 'every_measurement', self._static_descriptor()
         )
@@ -425,6 +443,11 @@ class ScalarFieldBeliefNode(Node):
             init_wall_lengthscale=float(
                 self.get_parameter('init_wall_lengthscale').value
             ),
+            target_transform_mode=str(
+                self.get_parameter('target_transform_mode').value
+            ),
+            target_offset=float(self.get_parameter('target_offset').value),
+            target_scale=float(self.get_parameter('target_scale').value),
         )
         cfg.validate()
         return cfg

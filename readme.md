@@ -9,14 +9,15 @@ The current version is intentionally simple:
 - 2D field belief over physical `x/y`
 - exact GP using GPyTorch
 - fixed physical input normalization bounds
-- target standardization from observed measurement values
+- configurable target transform: fixed offset and scale (default) or standardization from observed measurement values
 - query service for latent posterior mean and variance
 - query service for latent posterior mean and full covariance matrix
 - RViz point clouds for mean and variance visualization
 - optional wall-aware mode with smooth wall features (see [Wall-aware belief](#wall-aware-belief))
 - a separate, standalone visibility-graph GP belief (`scalar_field_belief.visgp`, no ROS node yet; see [visGP belief](#visgp-belief))
+- a separate, standalone exact GP with the learned Attentive Kernel (`scalar_field_belief.attentive`, no ROS node yet; see [Attentive Kernel GP belief](#attentive-kernel-gp-belief))
 
-The numerical core (`scalar_field_belief.belief`, `config`, `models`, `transforms`, `geometry`, `wall_features`, and the `visgp` subpackage) does not depend on ROS 2 and can also be used as an ordinary Python library (see [Standalone Python use](#standalone-python-use-without-ros-2)).
+The numerical core (`scalar_field_belief.belief`, `config`, `models`, `transforms`, `geometry`, `wall_features`, and the `visgp` and `attentive` subpackages) does not depend on ROS 2 and can also be used as an ordinary Python library (see [Standalone Python use](#standalone-python-use-without-ros-2)).
 
 It is designed to work together with:
 
@@ -124,6 +125,9 @@ config = BeliefConfig(
     wall_beta=1.0,
     wall_rho=0.35,
     init_wall_lengthscale=1.0,
+    target_transform_mode='fixed',
+    target_offset=0.0,
+    target_scale=0.01,
 )
 
 geometry = WallGeometry(
@@ -592,6 +596,252 @@ data model it is compared with. `functions.R` was read for comparison only
 Biometrics version was not compared.
 
 
+## Attentive Kernel GP belief
+
+`scalar_field_belief.attentive` is an exact GP with the Attentive Kernel (AK)
+of Chen, Khardon and Liu (RSS 2022; extended in IJRR 2023), a learned
+non-stationary comparator. It receives positions and measured values only:
+no walls, visibility, room labels, source information or ground truth. It
+uses NumPy, PyTorch and GPyTorch (float64), no ROS and no GUI. There is no
+ROS node yet; it is used from Python or through the
+[belief playground](tools/belief_playground/README.md) (`--backends
+gp,gp_attentive`). The adapted author code, the inspected revision and the
+differences from it are listed in
+[`attentive/PROVENANCE.md`](scalar_field_belief/attentive/PROVENANCE.md).
+
+| Module | Content |
+| --- | --- |
+| `attentive/config.py` | `AttentiveGPConfig` (fixed settings, `validate()`) |
+| `attentive/kernel.py` | `TwoHiddenLayerTanhNN`, `AttentiveKernel` (GPyTorch kernel, unit amplitude) |
+| `attentive/belief.py` | `AttentiveGPBelief`: `reset`, `add_measurement`, `query`, `predict_marginal`, `query_observation`, `query_with_covariance`, `measurement_noise_variance`, `attention_representations`, `status`, `fitted_summary` |
+
+### AK model
+
+```text
+u = ((x - x_min) / L, (y - y_min) / L),   L = max(x_max - x_min, y_max - y_min)
+r(u) = s(u) / ||s(u)||_2,   s(u) = softmax(MLP(u))   (M outputs, one network)
+k(u, v) = alpha * <r(u), r(v)> * sum_m r_m(u) r_m(v) exp(-||u - v||^2 / (2 ell_m^2))
+y_t = (y - target_offset) / target_scale
+f_t ~ GP(c_t, k),   y_t,i = f_t(u_i) + e_i,   e_i ~ N(0, sigma2_t) independent
+```
+
+The network is `Linear(2, H)-tanh-Linear(H, H)-tanh-Linear(H, M)-softmax`
+and supplies both representations of the paper (`w = z = r`). The primitive
+lengthscales `ell_m = linspace(min_lengthscale, max_lengthscale, M)` are
+fixed constants (a registered buffer), not optimized lengthscales. The
+learned quantities are the network weights, the amplitude `alpha`
+(`ScaleKernel` outputscale), the sensor-noise variance `sigma2_t` and the
+constant mean `c_t`.
+
+**Positive semidefinite for any weights.** Each `diag(r_m) K_m diag(r_m)` is
+PSD because `K_m` is an RBF Gram matrix, so their sum is PSD; the membership
+Gram matrix `R R^T` is PSD; their elementwise (Schur) product is PSD; and
+`alpha > 0`. Training changes the parameters of a valid kernel. Because `r`
+is normalized and every `k_m(u, u) = 1`, `k(u, u) = alpha` everywhere.
+Nothing is clipped, masked or projected.
+
+**Memberships are not visibility.** Softmax memberships are soft and in
+general overlap, so the covariance between two positions is rarely exactly
+zero. The learned membership similarity is not geometric line of sight: the
+AK has no wall shielding and need not recover a boundary it has no data
+for. Membership indices carry no physical meaning (no rooms or obstacles).
+
+**Units and conversions.** Positions in meters, values in the scenario unit
+("units"). `alpha`, `sigma2_t`, `c_t`, latent (co)variances and the training
+loss live in transformed units; the public API converts:
+mean `= target_offset + target_scale * mean_t`, latent variance, covariance,
+amplitude and noise variance `= target_scale^2 * (.)_t`. `init_amplitude`,
+`init_noise_variance` and `min_noise_variance` are configured as physical
+variances and divided by `target_scale^2`; `c_t` starts at 0 (=
+`target_offset`). Both transforms are fixed for the lifetime of a belief and
+come from the configuration and the domain bounds, never from data or
+simulator truth. `target_offset` is the constant prior mean (and stays the
+mean in frozen mode); the prior and all frozen-mode predictions are
+therefore invariant to `target_scale`. Trained results depend on both,
+because `target_offset` and `target_scale` (together with the learning
+rates) set the optimization dynamics and the starting constant mean. The
+reported loss is the negative log marginal likelihood per observation in
+transformed units; per observation in physical units it is
+`loss + log(target_scale)`.
+
+**Input normalizer and lengthscale bank.** The square normalizer keeps the
+kernel isotropic in meters: a normalized lengthscale `ell` is `ell * L`
+meters on both axes. For a 2 m x 4 m tank `L = 4 m`, `u` lies in
+`[0, 0.5] x [0, 1]`, and the default bank `0.02 .. 0.5` (10 values) is
+`0.08 .. 2.0 m`: the lower end is about the display/sampling resolution, the
+upper end half the long side. The author code maps each axis to `[-1, 1]`
+from the initial samples; its bank `0.01 .. 0.5` corresponds to
+`0.005 .. 0.25` of the extent. `belief.primitive_lengthscales_m()` returns
+the bank in meters.
+
+### AK training, conditioning and queries
+
+- Every accepted measurement is conditioned on immediately: the noisy
+  training covariance is factorized once per state (exact Cholesky, no
+  jitter) and reused by all queries until the next change.
+- Warm-up: optimization starts once `min_distinct_locations` distinct
+  locations have been measured. Locations are counted greedily in
+  observation order: a position within `distinct_location_separation`
+  (default 0.05 m) of an already counted location is a repeat, so repeated
+  or jittered observations are data but not new coverage (0 counts only
+  exactly equal positions as repeats). Optimizing on sparse,
+  unrepresentative data can bias the lengthscale selection (IJRR, Sec.
+  4.3.3).
+- Schedule: the first event runs `initial_training_steps` Adam steps on the
+  full-batch exact marginal likelihood (GPyTorch, averaged per observation);
+  later events run `training_steps_per_event` steps after every
+  `optimize_every` accepted measurements. One Adam optimizer is kept across
+  events with two groups: network weights (`learning_rate_network`) and
+  amplitude, noise and mean (`learning_rate_hyperparameters`). The network is
+  never re-initialized. The defaults are starting points: the author uses
+  1e-3 and 1e-2 and about one step per sample over hundreds of samples; the
+  paper trains `N_t` iterations after `N_t` new samples as a rule-of-thumb
+  early stopping. More optimization does not necessarily generalize better.
+- Frozen mode (`optimize_parameters: false`): no optimization at all;
+  every measurement is still conditioned on. Useful for numerical checks.
+- `add_measurement` is atomic. A non-finite input raises `ValueError`
+  before anything changes (it is not recorded). A numerical failure after
+  that (factorization, non-finite loss or gradient, or another torch error
+  during an event) raises `AttentiveGPError`; data, parameters, optimizer
+  state, counters and factorization are then restored, and
+  `status()['last_rejected']` names the measurement.
+- The belief may be used inside `torch.no_grad()` or
+  `torch.inference_mode()`: construction, reset and every add run with
+  gradients enabled and outside inference mode, and queries never record
+  gradients.
+- Queries (`query`, `predict_marginal`, `query_observation`,
+  `query_with_covariance`, `attention_representations`) do not train,
+  change parameters or transforms, or draw random numbers. `query` returns
+  the latent mean and variance in blocks; `query_observation` adds the
+  learned sensor-noise variance; `query_with_covariance` returns the latent
+  covariance (symmetrized, not clipped) for at most `max_joint_query_size`
+  positions. Latent variances down to `-1e-9 * alpha_t` are roundoff and
+  returned as 0 (counted by `predict_marginal`); more negative values raise.
+- `reset()` restores the seeded initial model bitwise, a fresh optimizer and
+  zero counters. The seed only drives a forked generator: the global torch
+  RNG is unchanged. Undo, load and reset in the playground reset and replay
+  all measurements, including every optimization event, so the replay cost
+  grows with the session. For the same observation order, configuration and
+  software the result is reproduced up to floating-point roundoff; across
+  platforms or library versions expect floating-point differences.
+- `status()` reports the phase (`warm-up`, `training`, `frozen`), counts of
+  measurements, distinct locations, events and steps, the loss before and
+  after the last event, and conditioning versus optimization time.
+  `fitted_summary()` reports amplitude, noise and mean in physical units and
+  the change of the network weights from their initial values.
+
+**Threads.** The matrices are small (tens to hundreds of rows), so torch's
+multi-threading overhead dominates the run time and one thread is typically
+several times faster. The belief therefore sets torch to `torch_threads`
+threads (default 1) for all its torch work (adds, training, factorization,
+queries) and restores the previous count afterwards, also on errors (0
+leaves torch's setting unchanged). With one thread the trained parameters
+do not depend on the machine's core count (summation order).
+
+**Empirical Bayes.** Network weights, amplitude, noise and mean are point
+estimates that maximize the marginal likelihood. The posterior does not
+include uncertainty about the network, and fitting a neural kernel does not
+make the uncertainty calibrated. With few or clustered observations the
+learned memberships can be arbitrary.
+
+### AK configuration
+
+`AttentiveGPConfig` fields; every field has a default. The playground reads
+them from `config/belief_params_attentive.yaml` (ROS parameter layout; the
+domain bounds always come from the scenario).
+
+| Parameter | Default | Unit | Meaning |
+| --- | --- | --- | --- |
+| `num_components` | `10` | - | number `M` of primitive RBF components / network outputs |
+| `hidden_width` | `10` | - | width `H` of both hidden layers |
+| `min_lengthscale` | `0.02` | normalized (x `L` for m) | smallest primitive lengthscale |
+| `max_lengthscale` | `0.5` | normalized (x `L` for m) | largest primitive lengthscale (equal to the smallest for `M = 1`) |
+| `seed` | `0` | - | network initialization seed (local generator) |
+| `target_offset` | `0.0` | units | offset of the fixed target transform |
+| `target_scale` | `0.01` | units | scale of the fixed target transform, > 0 |
+| `init_amplitude` | `1.0e-4` | units^2 | initial `alpha` (prior variance) |
+| `init_noise_variance` | `1.0e-6` | units^2 | initial sensor-noise variance, > `min_noise_variance` |
+| `min_noise_variance` | `1.0e-8` | units^2 | lower bound of the learned noise variance |
+| `optimize_parameters` | `true` | - | `false`: frozen mode (conditioning only) |
+| `min_distinct_locations` | `10` | - | distinct locations before the first event |
+| `distinct_location_separation` | `0.05` | m | positions within this distance of a counted location are repeats for the warm-up rule (0 = exact equality) |
+| `initial_training_steps` | `100` | - | Adam steps of the first event |
+| `optimize_every` | `1` | measurements | cadence of later events |
+| `training_steps_per_event` | `5` | - | Adam steps of each later event |
+| `learning_rate_network` | `3.0e-3` | - | Adam learning rate of the network weights |
+| `learning_rate_hyperparameters` | `3.0e-2` | - | Adam learning rate of amplitude, noise and mean |
+| `max_joint_query_size` | `2000` | - | largest `query_with_covariance` batch |
+| `torch_threads` | `1` | - | torch intra-op threads for all AK torch work (restored afterwards; 0 = unchanged) |
+
+### AK usage without ROS
+
+With `src/scalar_field_belief` on `PYTHONPATH` or the package installed with
+pip:
+
+```python
+import numpy as np
+
+from scalar_field_belief.attentive import AttentiveGPBelief, AttentiveGPConfig
+
+config = AttentiveGPConfig(min_distinct_locations=4)  # other fields: defaults
+belief = AttentiveGPBelief(config, x_range=(0.0, 2.0), y_range=(0.0, 4.0))
+
+# (x [m], y [m], measured value [V])
+readings = [
+    (0.5, 1.0, 0.0106),
+    (0.7, 2.0, 0.0111),
+    (0.5, 3.0, 0.0098),
+    (1.5, 1.0, 0.0031),
+    (1.5, 3.0, 0.0027),
+]
+for x, y, value in readings:
+    belief.add_measurement(x=x, y=y, value=value)  # first event at the 4th
+
+xy = np.array([[0.6, 1.5], [1.5, 1.5], [1.0, 2.0]])
+mean, variance = belief.query(xy)  # latent [V], [V^2]
+mean, obs_variance = belief.query_observation(xy)  # + sensor noise [V^2]
+mean, covariance = belief.query_with_covariance(xy)  # (3,), (3, 3)
+print(belief.status()['phase'], belief.status()['optimization_events'])
+print(belief.fitted_summary()['noise_std'])  # [V]
+print(belief.primitive_lengthscales_m())  # [m], 0.08 .. 2.0
+print(belief.attention_representations(xy).shape)  # (3, 10), diagnostics
+```
+
+Playground comparison with the baseline GP and the headless numerical
+diagnostic, from the workspace root without sourcing ROS:
+
+```bash
+env -u PYTHONPATH -u AMENT_PREFIX_PATH \
+  PYTHONPATH=src/scalar_field_belief:src/scalar_field_belief/tools/belief_playground:src/scalar_field_sim \
+  python3 -m belief_playground --scenario 01_single_wall --backends gp,gp_attentive
+
+env -u PYTHONPATH -u AMENT_PREFIX_PATH \
+  PYTHONPATH=src/scalar_field_belief:src/scalar_field_belief/tools/belief_playground:src/scalar_field_sim \
+  python3 -m belief_playground.attentive_diagnostics [--author-demo PATH/demo/main.py]
+```
+
+The diagnostic checks the kernel (PSD, diagonal semantics, batching,
+stationary reductions and, with `--author-demo`, parity with the author's
+implementation: its kernel definitions are extracted from `demo/main.py`
+with `ast`, and only those definitions are executed). It also checks the
+belief against dense Gaussian oracles, the schedule, rollback, query side
+effects, reset/replay, and imports without GMRF and visGP. It runs one
+playground Session and reports, without judging, its reconstruction
+quality. See the
+[playground README](tools/belief_playground/README.md#gp-attentive-kernel).
+
+### AK limitations and deferred work
+
+- Dense exact GP: `n^3` per Adam step and per conditioning; for small `n`
+  the time is dominated by per-operation overhead of GPyTorch and autograd.
+- The GPyTorch/linear_operator settings used during training and torch's
+  thread count are process-global; use one belief from one thread at a time
+  (the playground uses its single worker thread).
+- Deferred: sparse/variational inference, a ROS 2 wrapper, a
+  geometry-conditioned AK (a separate modelling change), and separate
+  networks for the two representations.
+
+
 ## Full Simulation Setup
 
 For a fully functional demo, run the following launch files. 
@@ -632,10 +882,18 @@ x_norm = (x - x_min) / (x_max - x_min)
 y_norm = (y - y_min) / (y_max - y_min)
 ```
 
-Measurement values are standardized during GP fitting. This is separate from input normalization:
+Measurement values `y` are transformed before GP fitting:
 
-- input normalization uses fixed physical domain bounds
-- target standardization uses the observed measurement values
+```text
+y_t = (y - offset) / scale
+```
+
+This is separate from input normalization: input normalization uses fixed physical domain bounds, while the target transform is selected with `target_transform_mode`:
+
+- `fixed` (default): `offset = target_offset` (default `0.0`) and `scale = target_scale` (default `0.01`, must be positive), both in measurement units. They stay constant over all measurements, refits, and resets.
+- `standardize`: offset and scale are the mean and population standard deviation of all stored measurements, re-estimated at every refit and every conditioning update between refits (a standard deviation below `1e-12` is replaced by `1`). `target_offset` and `target_scale` are ignored.
+
+`init_outputscale` and `init_noise` are in transformed target units. The physical prior variance is `init_outputscale * scale^2` and the physical noise variance is `init_noise * scale^2`. With the shipped values (`init_outputscale: 1.0`, `init_noise: 0.01`, `target_scale: 0.01`), these are `1e-4` units^2 (std `0.01`) and `1e-6` units^2 (std `1e-3`). The physical prior mean is `offset + scale * c_t`, where `c_t` is the GP's constant mean in transformed units; it starts at `0` at every refit and is only learned with `optimize_hyperparameters: true`. In `fixed` mode the posterior therefore reverts to about `target_offset` far from the measurements, instead of to their empirical mean. In `standardize` mode the scale is the current empirical standard deviation, so the physical prior changes as measurements arrive. `fitted_hyperparameters_physical()` and `measurement_noise_variance()` report the outputscale and noise variance in measurement units squared with the same factor `scale^2`; lengthscales are not affected. Use float literals (e.g. `0.0`, not `0`) for `target_offset` and `target_scale` in YAML files.
 
 The query service returns the latent GP posterior mean and variance in the original measurement units. The returned variance is in measurement-units squared and does not include additional observation noise.
 
