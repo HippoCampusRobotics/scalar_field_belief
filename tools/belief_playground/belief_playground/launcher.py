@@ -27,7 +27,8 @@ or creates nodes.
 * Default backend configs: the installed launcher uses
   `share/scalar_field_belief/config/`; `python -m belief_playground` from a
   source checkout uses the checkout's files (falling back to the share). The
-  visGP config is looked up only when the visgp backend is selected.
+  visGP and attentive-kernel GP configs are looked up only when the visgp or
+  gp_attentive backend is selected.
 """
 
 from __future__ import annotations
@@ -37,6 +38,7 @@ from pathlib import Path
 
 from belief_playground.backends import (
     DEFAULT_GMRF_CONFIG,
+    DEFAULT_GP_ATTENTIVE_CONFIG,
     DEFAULT_GP_CONFIG,
     DEFAULT_GP_WALL_AWARE_CONFIG,
     DEFAULT_VISGP_CONFIG,
@@ -47,6 +49,7 @@ GP_CONFIG_NAME = 'belief_params_default.yaml'
 GP_WALL_AWARE_CONFIG_NAME = 'belief_params_wall_aware.yaml'
 GMRF_CONFIG_NAME = 'belief_params_gmrf.yaml'
 VISGP_CONFIG_NAME = 'belief_params_visgp.yaml'
+GP_ATTENTIVE_CONFIG_NAME = 'belief_params_attentive.yaml'
 
 
 class ResourceError(RuntimeError):
@@ -181,6 +184,20 @@ def default_visgp_config(installed: bool) -> Path:
             'sourced?); pass --visgp-config explicitly'
         )
     return share / 'config' / VISGP_CONFIG_NAME
+
+
+def default_gp_attentive_config(installed: bool) -> Path:
+    """Attentive-kernel GP config used when no --gp-attentive-config is
+    given."""
+    if not installed and DEFAULT_GP_ATTENTIVE_CONFIG.is_file():
+        return DEFAULT_GP_ATTENTIVE_CONFIG
+    share = package_share('scalar_field_belief')
+    if share is None:
+        raise ResourceError(
+            'cannot find share/scalar_field_belief (is the workspace '
+            'sourced?); pass --gp-attentive-config explicitly'
+        )
+    return share / 'config' / GP_ATTENTIVE_CONFIG_NAME
 
 
 def main() -> int:

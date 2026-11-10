@@ -1,0 +1,69 @@
+# Parameters of the Attentive Kernel GP belief
+# (scalar_field_belief.attentive.AttentiveGPBelief), read by the belief
+# playground (--gp-attentive-config). There is no ROS node for it yet; the
+# file uses the ROS parameter layout of the other belief configurations.
+# Parameters left out keep the AttentiveGPConfig defaults.
+#
+# Units: positions in meters; "units" = measurement unit of the scalar value
+# (the scenario unit, e.g. V). init_amplitude, init_noise_variance and
+# min_noise_variance are VARIANCES (units^2), not standard deviations.
+# Lengthscales are in normalized input units: positions are mapped with a
+# fixed square normalizer of side L = max(x extent, y extent) [m], so a
+# normalized lengthscale ell is ell * L meters on both axes. Prefer floats
+# with a decimal point and a signed exponent (1.0e-4): PyYAML reads 1e-4 as a
+# string, which the playground converts, but other YAML readers may not.
+/**:
+  ros__parameters:
+    # Domain [m]. The playground replaces it with the scenario bounds.
+    x_min: 0.0
+    x_max: 2.0
+    y_min: 0.0
+    y_max: 4.0
+
+    # Attention network Linear(2, H)-tanh-Linear(H, H)-tanh-Linear(H, M)-softmax
+    # (one shared network for both representations) and the fixed primitive
+    # RBF lengthscales linspace(min_lengthscale, max_lengthscale, M)
+    # [normalized; 2 m x 4 m: L = 4 m, 0.08 .. 2.0 m].
+    num_components: 10                  # M
+    hidden_width: 10                    # H
+    min_lengthscale: 0.02               # [normalized] (0.08 m for L = 4 m)
+    max_lengthscale: 0.5                # [normalized] (2.0 m for L = 4 m)
+    seed: 0                             # network initialization (local RNG)
+
+    # Fixed affine target transform y_t = (y - target_offset) / target_scale,
+    # never refitted. target_offset is the constant prior mean (also in
+    # frozen mode). The prior and frozen-mode predictions do not depend on
+    # target_scale (initial values are physical); trained results depend on
+    # both: offset and scale (with the learning rates) set the optimization
+    # dynamics and the starting constant mean. The reported loss is per
+    # observation in transformed units; physical NLML per observation =
+    # loss + log(target_scale).
+    target_offset: 0.0                  # [units]
+    target_scale: 0.01                  # [units], > 0
+
+    # Initial values, converted with target_scale^2 (learned afterwards).
+    init_amplitude: 1.0e-4              # alpha = k(u, u) [units^2] (std 0.01 units)
+    init_noise_variance: 1.0e-6         # sensor noise [units^2] (std 1.0e-3 units)
+    min_noise_variance: 1.0e-8          # lower bound of the learned noise [units^2]
+
+    # Training (empirical Bayes, full-batch exact marginal likelihood, Adam).
+    # false = frozen mode: parameters stay at the initial values; every
+    # measurement is still conditioned on.
+    optimize_parameters: true
+    min_distinct_locations: 10          # warm-up: distinct locations before the first event
+    # A position within this distance of an already counted location is a
+    # repeat for the warm-up rule (greedy, in observation order); 0 = only
+    # exactly equal positions are repeats.
+    distinct_location_separation: 0.05  # [m]
+    initial_training_steps: 100         # Adam steps of the first event
+    optimize_every: 1                   # later event after every k accepted measurements
+    training_steps_per_event: 5         # Adam steps of each later event
+    learning_rate_network: 3.0e-3       # network weights
+    learning_rate_hyperparameters: 3.0e-2  # amplitude, noise, constant mean
+
+    max_joint_query_size: 2000          # largest full-covariance query
+    # torch intra-op threads for all AK torch work (adds, training,
+    # factorization, queries), restored afterwards; 0 = leave torch's setting
+    # unchanged. Multi-threading overhead dominates for these small matrices;
+    # with one thread trained parameters do not depend on the core count.
+    torch_threads: 1

@@ -29,6 +29,7 @@ from belief_playground.launcher import (
     ResourceError,
     available_scenarios,
     default_configs,
+    default_gp_attentive_config,
     default_visgp_config,
     resolve_scenario,
     scenario_roots,
@@ -41,8 +42,8 @@ def parse_args(argv=None, prog: str | None = None):
     p = argparse.ArgumentParser(
         prog=prog or 'python -m belief_playground',
         description='Click a scenario map to add scalar observations and compare '
-        'the baseline GP, wall-aware GP, GMRF and visGP beliefs (Qt window, no '
-        'ROS nodes).',
+        'the baseline GP, wall-aware GP, GMRF, visGP and Attentive Kernel GP '
+        'beliefs (Qt window, no ROS nodes).',
     )
     p.add_argument(
         '--scenario',
@@ -85,6 +86,13 @@ def parse_args(argv=None, prog: str | None = None):
         type=Path,
         default=None,
         help='visGP parameter YAML (default: config/belief_params_visgp.yaml)',
+    )
+    p.add_argument(
+        '--gp-attentive-config',
+        type=Path,
+        default=None,
+        help='Attentive Kernel GP parameter YAML (default: '
+        'config/belief_params_attentive.yaml)',
     )
     p.add_argument(
         '--gmrf-module-dir', type=Path, default=None, help=argparse.SUPPRESS
@@ -181,6 +189,9 @@ def build_session(args, installed: bool = False) -> Session:
     visgp_config = getattr(args, 'visgp_config', None)
     if 'visgp' in names and visgp_config is None:
         visgp_config = default_visgp_config(installed)
+    gp_attentive_config = getattr(args, 'gp_attentive_config', None)
+    if 'gp_attentive' in names and gp_attentive_config is None:
+        gp_attentive_config = default_gp_attentive_config(installed)
     backends = make_backends(
         names,
         scenario.domain,
@@ -189,6 +200,7 @@ def build_session(args, installed: bool = False) -> Session:
         args.gmrf_module_dir,
         gp_wall_aware_config=gp_wall_aware_config,
         visgp_config=visgp_config,
+        gp_attentive_config=gp_attentive_config,
     )
     for name, b in backends.items():
         reason = getattr(b, 'unavailable_reason', None)
